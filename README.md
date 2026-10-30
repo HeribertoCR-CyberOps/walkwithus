@@ -8,10 +8,12 @@ Trained adult volunteers on public corners at school times — the model that cu
 - Families see where and when adults are on duty, and can ask for **two adults** to walk with a student.
 - Volunteers apply, are **met in person and approved** by the organization, and check in at a corner with a private link.
 - Coordinators see coverage, assign walks to **two approved adults** (enforced by the database), and call families back.
-- One-tap **911 / Crime Stoppers / 988** on every screen. Plain-language rights info (safety transfers, bullying complaints).
-- English and Spanish. Installable on any phone from a QR code. No ads, trackers or third-party requests.
+- One-tap **911 / Crime Stoppers / 988** on every screen — and they keep working offline. Plain-language rights info (safety transfers, bullying complaints).
+- **English + all ten NYC Local Law 30 languages** (Spanish, Chinese, Russian, Bengali, Haitian Creole, Korean, Arabic, Urdu, French, Polish), right-to-left layout for Arabic and Urdu; callbacks can also be requested in Twi, Wolof and Pulaar.
+- Installable on any phone from a QR code. Works offline after the first visit. No ads, trackers, third-party requests — and **no AI** ([policy](docs/AI-POLICY.md)).
+- Self-healing operations: edge-cached schedule that survives a database outage, hourly maintenance with recorded results, background key rotation, readiness endpoint, external monitor ([SLO](docs/SLO.md)).
 
-See [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the design and its mathematical guarantees.
+See [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the design and its mathematical guarantees, and [`docs/AUDIT.md`](docs/AUDIT.md) for the security and reliability audit.
 
 ## For organizations
 
@@ -37,8 +39,10 @@ Then: protect `/c.html*` and `/api/c/*` with a Cloudflare Access application, pu
 ## Test
 
 ```bash
-npm test     # 18 end-to-end tests against the real Workers runtime and a local D1
+npm test          # 24 end-to-end tests: real Workers runtime + local D1 (auth, privacy wall, Rule of Two, rate limits, audit chain, purge, key-rotation drill)
+npm run test:ui   # 26 browser checks: every language in light and dark, RTL, offline mode, volunteer and coordinator pages
 npm run typecheck
+node scripts/monitor.mjs https://<your-host> <org-slug>   # external availability probe
 ```
 
 ## License

@@ -54,7 +54,7 @@ ul.plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .badge.warn { color: var(--warn); border-color: var(--warn); }
 .badge.bad { color: var(--danger); border-color: var(--danger); }
 .lang { display: flex; gap: 6px; }
-.lang button { min-height: 36px; padding: 4px 10px; font-size: .9rem; }
+.lang select { min-height: 40px; padding: 4px 10px; width: auto; }
 header.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 details summary { cursor: pointer; font-weight: 700; min-height: 32px; }
 table { width: 100%; border-collapse: collapse; font-size: .95rem; }
@@ -64,3 +64,6 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; word-break
 .hidden { display: none !important; }
 main.wide { max-width: 1080px; }
 #content { display: grid; gap: 16px; }
+[dir="rtl"] .check { flex-direction: row-reverse; text-align: right; }
+[dir="rtl"] ol, [dir="rtl"] ul { padding-right: 1.4em; padding-left: 0; }
+:lang(bn), :lang(ur), :lang(ar) { line-height: 1.75; }

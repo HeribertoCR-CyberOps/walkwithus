@@ -15,15 +15,17 @@
 <main id="app">
   <header class="top">
     <div><h1 id="title">Walk With Us</h1><p class="muted" id="tagline"></p></div>
-    <div class="lang"><button class="secondary" data-lang="en">EN</button><button class="secondary" data-lang="es">ES</button></div>
+    <div class="lang"><select id="langsel"></select></div>
   </header>
+  <p id="draftnote" class="muted" hidden></p>
+  <p id="offline" class="result err" role="status" hidden></p>
   <nav class="sos" aria-label="Emergency">
     <a class="call911" href="tel:911" id="sos911">Danger now? Call 911</a>
     <a class="other" href="tel:18005778477" id="sostips">Anonymous tip: 1-800-577-TIPS</a>
     <a class="other" href="tel:988" id="soscrisis">Crisis line: 988</a>
   </nav>
   <div id="content"><p class="muted">Loading…</p></div>
-  <footer class="muted"><small>Free and open source (AGPL-3.0). No ads, no trackers, no third-party requests. <a href="/privacy.html">Privacy</a></small></footer>
+  <footer class="muted"><small>Free and open source (AGPL-3.0). No ads, no trackers, no third-party requests. <a href="/privacy">Privacy</a></small></footer>
 </main>
 </body>
 </html>

@@ -1,0 +1,18 @@
+# Best-effort external probe (GitHub schedules can be delayed). Primary monitoring: a 60-second probe from your own
+# infrastructure using scripts/monitor.mjs (see docs/SLO.md). Set repository variable MONITOR_URL (and MONITOR_ORG).
+name: monitor
+on:
+  schedule: [{ cron: "*/5 * * * *" }]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: ${{ vars.MONITOR_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node scripts/monitor.mjs "${{ vars.MONITOR_URL }}" ${{ vars.MONITOR_ORG }}

@@ -103,7 +103,7 @@ async function load() {
     }
     D = await api(`/api/c/${slug}/dashboard`);
     document.getElementById("who").textContent = `${D.you.email} · ${D.you.role} · ${D.org.name}`;
-    content.replaceChildren(cornersSection(), walksSection(), volunteersSection(), adminSection());
+    content.replaceChildren(...[cornersSection(), walksSection(), volunteersSection(), adminSection()].filter(Boolean));
   } catch (e) {
     content.replaceChildren(el("p", { class: "result err", text: e.message === "access_required" ? "Sign in through your organization's Cloudflare Access link." : e.message === "not_a_coordinator_for_org" ? "Your account is not a coordinator for this program." : "Error: " + e.message }));
   }

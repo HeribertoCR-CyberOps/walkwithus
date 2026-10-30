@@ -47,7 +47,27 @@ Public page for the org: `https://<host>/?o=example-slug` — print it as a QR c
 ## 5. Operations
 
 - **Audit check:** Coordinator dashboard → Admin → Verify audit log (monthly; record the result).
-- **Key rotation:** DATA_KEY rotation requires re-encrypting rows; do it only with the maintainers' script (not in v1). HMAC_KEY can be rotated any time (dedupe and rate windows reset).
+- **Key rotation:** see section 7 for DATA_KEY. HMAC_KEY can be rotated any time (dedupe and rate windows reset).
 - **Backups:** `npx wrangler d1 export walkwithus --remote --output backup.sql` — the export contains ciphertext only; still store it encrypted.
 - **Logs:** Workers observability is on; the code never logs request bodies or personal data.
 - **Offboarding an org:** set `orgs.active=0`, then delete its rows by `org_id`; confirm in writing.
+
+## 6. Debugging and incident response
+
+- **Every API response has an `x-request-id`.** Error responses also return it in the body. Ask the reporter for it, then find the line in the logs:
+  ```bash
+  npx wrangler tail walkwithus --format json | grep <request-id>
+  ```
+  Logs are structured JSON (`level`, `event`, `rid`, `route`, `s`, `ms`) and never contain bodies, phone numbers, names or IP addresses.
+- **Readiness:** `GET /api/health/ready` returns `problems[]` (e.g. `db_unreachable`, `maintenance_stale_or_failing`, `audit_chain_broken`) and the last result of each maintenance step.
+- **Local debugging:** set `DEBUG=1` in `.dev.vars` to add error messages and the first stack frame to `unhandled` log lines; run `npx wrangler dev --inspector-port 9229` and attach Chrome DevTools (`chrome://inspect`) or VS Code for breakpoints. Never set `DEBUG` in production.
+- **Run maintenance now (local):** `npx wrangler dev --test-scheduled`, then `curl "http://localhost:8787/__scheduled?cron=17+*+*+*+*"`.
+
+## 7. Key rotation (DATA_KEY)
+
+1. `npx wrangler secret put DATA_KEY_PREV` ← paste the **current** key.
+2. `openssl rand -base64 32 | npx wrangler secret put DATA_KEY` (store the new key in the password manager).
+3. Watch `/api/health/ready` → `checks.rekey`. Hourly maintenance re-seals up to 300 records per table per run; repeat until `pending:false`.
+4. `npx wrangler secret delete DATA_KEY_PREV`. `rotation_in_progress` turns false.
+
+The rotation drill in the test suite exercises exactly this sequence.

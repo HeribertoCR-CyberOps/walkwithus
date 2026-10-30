@@ -13,6 +13,7 @@ export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   DATA_KEY: string;
+  DATA_KEY_PREV?: string;      // previous key during rotation: decrypt-only; cron re-seals rows under DATA_KEY
   HMAC_KEY: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITEKEY?: string;
@@ -20,7 +21,34 @@ export interface Env {
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
   ACCESS_JWKS_JSON?: string;   // tests only: key set used instead of fetching certs; verification still enforced
+  DEBUG?: string;              // "1" = include error message + first stack frame in logs. Local/dev only — never in production.
   RETENTION_HOURS: string;
+}
+
+const VERSION = "1.1.0";
+const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
+
+// ------------------------------------------------------------------ observability (structured, never personal data)
+function log(level: "info" | "warn" | "error", event: string, fields: Record<string, string | number | boolean | null> = {}): void {
+  const line = JSON.stringify({ level, event, v: VERSION, ...fields });
+  if (level === "error") console.error(line); else if (level === "warn") console.warn(line); else console.log(line);
+}
+/** Route template for logs: ids and slugs collapsed so logs carry shape, not identifiers. */
+function routeOf(path: string): string {
+  return path.replace(/\/o\/[a-z0-9-]+/, "/o/:org").replace(/\/c\/(?!me$)[a-z0-9-]+/, "/c/:org")
+    .replace(/\/[0-9a-z]{26}(?=\/|$)/, "/:walk").replace(/\/\d+(?=\/|$)/, "/:id");
+}
+
+/** Retry transient D1 failures (network blips, object resets) for idempotent reads only. */
+async function retry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 0; ; i++) {
+    try { return await fn(); }
+    catch (e) {
+      const m = String(e);
+      if (i + 1 >= attempts || !/Network connection lost|reset|overloaded|temporarily|SQLITE_BUSY|internal error/i.test(m)) throw e;
+      await new Promise((r) => setTimeout(r, 50 * 2 ** i));
+    }
+  }
 }
 
 // ------------------------------------------------------------------ http helpers
@@ -32,9 +60,11 @@ const SEC_HEADERS: Record<string, string> = {
   "referrer-policy": "no-referrer",
   "cross-origin-resource-policy": "same-origin",
   "x-frame-options": "DENY",
+  "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+  "strict-transport-security": "max-age=63072000; includeSubDomains",
 };
-function json(obj: unknown, status = 200): Response {
-  return new Response(JSON.stringify(obj), { status, headers: SEC_HEADERS });
+function json(obj: unknown, status = 200, extra: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(obj), { status, headers: { ...SEC_HEADERS, ...extra } });
 }
 function bad(code: string): never { throw new HttpError(400, code); }
 
@@ -140,12 +170,18 @@ async function auditVerify(env: Env): Promise<{ ok: boolean; entries: number; br
   return { ok: true, entries: results.length };
 }
 
+// ------------------------------------------------------------------ decryption with key rotation
+async function openAny(env: Env, aad: string, sealed: string): Promise<string> {
+  try { return await open(env.DATA_KEY, aad, sealed); }
+  catch (e) { if (!env.DATA_KEY_PREV) throw e; return await open(env.DATA_KEY_PREV, aad, sealed); }
+}
+
 // ------------------------------------------------------------------ lookups
 interface Org { id: number; slug: string; name: string; public_phone: string | null; borough: string | null; }
 async function orgBySlug(env: Env, slug: string): Promise<Org> {
   if (!/^[a-z0-9-]{3,40}$/.test(slug)) throw new HttpError(404, "no_org");
-  const o = await env.DB.prepare("SELECT id, slug, name, public_phone, borough FROM orgs WHERE slug=? AND active=1")
-    .bind(slug).first<Org>();
+  const o = await retry(() => env.DB.prepare("SELECT id, slug, name, public_phone, borough FROM orgs WHERE slug=? AND active=1")
+    .bind(slug).first<Org>());
   if (!o) throw new HttpError(404, "no_org");
   return o;
 }
@@ -157,14 +193,40 @@ async function corner(env: Env, orgId: number, id: number) {
 }
 
 // ------------------------------------------------------------------ public handlers
+// Public schedule is public data: served from the edge cache for 60 s (cuts D1 reads) and, if D1 is unavailable,
+// served stale for up to 24 h (stale-if-error) so families can still see when adults are on duty.
+const cacheKey = (slug: string) => new Request(`https://cache.walkwithus.internal/org/${slug}`);
+const FRESH_S = 60, STALE_S = 86400;
+async function invalidateOrg(slug: string): Promise<void> {
+  try { await caches.default.delete(cacheKey(slug)); } catch { /* cache unavailable (e.g. workers.dev): nothing to invalidate */ }
+}
 async function publicOrg(env: Env, slug: string): Promise<Response> {
-  const o = await orgBySlug(env, slug);
-  const corners = (await env.DB.prepare(
-    "SELECT id, label, cross_streets, lat, lon FROM corners WHERE org_id=? AND active=1 ORDER BY label").bind(o.id).all()).results;
-  const windows = (await env.DB.prepare(
-    "SELECT corner_id, dow, start_min, end_min FROM windows WHERE org_id=? ORDER BY dow, start_min").bind(o.id).all()).results;
-  return json({ org: { slug: o.slug, name: o.name, public_phone: o.public_phone, borough: o.borough },
-    corners, windows, turnstile_sitekey: env.TURNSTILE_SITEKEY || null, retention_hours: Number(env.RETENTION_HOURS) });
+  const key = cacheKey(slug);
+  let cached: Response | undefined;
+  try { cached = await caches.default.match(key); } catch { cached = undefined; }
+  const age = cached ? Math.floor(Date.now() / 1000) - Number(cached.headers.get("x-fetched-at") || 0) : Infinity;
+  if (cached && age < FRESH_S) return json(await cached.json(), 200, { "x-cache": "hit" });
+  try {
+    const o = await orgBySlug(env, slug);
+    const corners = (await retry(() => env.DB.prepare(
+      "SELECT id, label, cross_streets, lat, lon FROM corners WHERE org_id=? AND active=1 ORDER BY label").bind(o.id).all())).results;
+    const windows = (await retry(() => env.DB.prepare(
+      "SELECT corner_id, dow, start_min, end_min FROM windows WHERE org_id=? ORDER BY dow, start_min").bind(o.id).all())).results;
+    const body = { org: { slug: o.slug, name: o.name, public_phone: o.public_phone, borough: o.borough },
+      corners, windows, turnstile_sitekey: env.TURNSTILE_SITEKEY || null, retention_hours: Number(env.RETENTION_HOURS) };
+    try {
+      await caches.default.put(key, new Response(JSON.stringify(body), { headers: {
+        "content-type": "application/json", "cache-control": `public, max-age=${STALE_S}`, "x-fetched-at": String(Math.floor(Date.now() / 1000)) } }));
+    } catch { /* best effort */ }
+    return json(body, 200, { "x-cache": "miss" });
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 404) throw e;
+    if (cached && age < STALE_S) {
+      log("warn", "serve_stale_schedule", { age_s: age });
+      return json(await cached.json(), 200, { "x-cache": "stale", "x-stale-age": String(age) });
+    }
+    throw e;
+  }
 }
 
 async function volunteerApply(req: Request, env: Env, slug: string): Promise<Response> {
@@ -208,7 +270,7 @@ async function walkRequest(req: Request, env: Env, slug: string): Promise<Respon
   const cb = phone(b.callback);
   const cbHash = await hmac(env.HMAC_KEY, "callback|" + cb);
   await limit(env, "walk-callback", cbHash, 3, 86400);
-  const lang = typeof b.lang === "string" && ["en", "es", "fr", "ak"].includes(b.lang) ? b.lang : "en";
+  const lang = typeof b.lang === "string" && (LANGS as readonly string[]).includes(b.lang) ? b.lang : "en";
   const id = randomString(26, ID_ALPHABET), ref = randomString(6, REF_ALPHABET);
   const expires = slot + Number(env.RETENTION_HOURS || 72) * 3600;
   await env.DB.prepare(
@@ -245,7 +307,7 @@ async function volunteerApi(req: Request, env: Env, action: string): Promise<Res
       .bind(v.id, now).all()).results;
     const corners = (await env.DB.prepare("SELECT id, label FROM corners WHERE org_id=? AND active=1 ORDER BY label")
       .bind(v.org_id).all()).results;
-    const name = await open(env.DATA_KEY, `volunteers|name|${v.org_id}`, v.name_enc);
+    const name = await openAny(env, `volunteers|name|${v.org_id}`, v.name_enc);
     return json({ first_name: name.split(/\s+/)[0], shift, walks, corners });
   }
   if (action === "checkin") {
@@ -268,6 +330,15 @@ async function volunteerApi(req: Request, env: Env, action: string): Promise<Res
 }
 
 // ------------------------------------------------------------------ coordinator handlers (Access + coordinators)
+/** A coordinator can decrypt at most 30 contact numbers per hour. Normal work needs a handful; a bulk export cannot hide. */
+const REVEALS_PER_HOUR = 30;
+async function revealGuard(env: Env, orgId: number, actor: string): Promise<void> {
+  try { await limit(env, "reveal", actor, REVEALS_PER_HOUR, 3600); }
+  catch (e) {
+    if (e instanceof HttpError && e.status === 429) { await audit(env, orgId, actor, "reveal_throttled", "limit"); log("warn", "reveal_throttled", { org: orgId }); }
+    throw e;
+  }
+}
 async function coordinator(req: Request, env: Env, slug: string): Promise<{ id: Identity; org: Org; role: string }> {
   const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
   if (!id) throw new HttpError(401, "access_required");
@@ -298,8 +369,8 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
       .bind(org.id).all<{ id: number; name_enc: string; phone_enc: string; status: string; corners_pref: string; created_at: number }>()).results;
     const volunteers = [];
     for (const v of vrows) {
-      const ph = await open(env.DATA_KEY, `volunteers|phone|${org.id}`, v.phone_enc);
-      volunteers.push({ id: v.id, name: await open(env.DATA_KEY, `volunteers|name|${org.id}`, v.name_enc),
+      const ph = await openAny(env, `volunteers|phone|${org.id}`, v.phone_enc);
+      volunteers.push({ id: v.id, name: await openAny(env, `volunteers|name|${org.id}`, v.name_enc),
         phone_masked: "•••-•••-" + ph.slice(-4), status: v.status, corners_pref: JSON.parse(v.corners_pref), created_at: v.created_at });
     }
     const onShift = (await env.DB.prepare(
@@ -333,8 +404,9 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
       await audit(env, org.id, actor, "volunteer_suspended", `vol:${vid}`);
       return json({ ok: true });
     }
+    await revealGuard(env, org.id, actor);
     await audit(env, org.id, actor, "volunteer_phone_revealed", `vol:${vid}`);
-    return json({ phone: await open(env.DATA_KEY, `volunteers|phone|${org.id}`, v.phone_enc) });
+    return json({ phone: await openAny(env, `volunteers|phone|${org.id}`, v.phone_enc) });
   }
 
   if (res === "walks" && rid && /^[0-9a-z]{26}$/.test(rid)) {
@@ -343,8 +415,9 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     if (!w) throw new HttpError(404, "no_walk");
     if (verb === "reveal") {
       await body(req, []);
+      await revealGuard(env, org.id, actor);
       await audit(env, org.id, actor, "walk_callback_revealed", w.id);
-      return json({ callback: await open(env.DATA_KEY, `walk|callback|${org.id}|${w.id}`, w.callback_enc) });
+      return json({ callback: await openAny(env, `walk|callback|${org.id}|${w.id}`, w.callback_enc) });
     }
     if (verb === "assign") {
       const b = await body<Record<string, unknown>>(req, ["v1", "v2"]);
@@ -378,12 +451,14 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
       .bind(org.id, str(b.label, 3, 120, "bad_label"), str(b.cross_streets, 3, 160, "bad_cross_streets"),
         Math.round(lat * 1e5) / 1e5, Math.round(lon * 1e5) / 1e5).first<{ id: number }>();
     await audit(env, org.id, actor, "corner_created", `corner:${r?.id}`);
+    await invalidateOrg(org.slug);
     return json({ ok: true, id: r?.id }, 201);
   }
   if (res === "corners" && rid && verb === "deactivate") {
     await body(req, []);
     await env.DB.prepare("UPDATE corners SET active=0 WHERE id=? AND org_id=?").bind(int(Number(rid), "bad_id"), org.id).run();
     await audit(env, org.id, actor, "corner_deactivated", `corner:${rid}`);
+    await invalidateOrg(org.slug);
     return json({ ok: true });
   }
   if (res === "windows" && !rid) {
@@ -396,6 +471,7 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     if (e <= s) bad("end_before_start");
     await env.DB.prepare("INSERT INTO windows (org_id, corner_id, dow, start_min, end_min) VALUES (?,?,?,?,?)").bind(org.id, c.id, dow, s, e).run();
     await audit(env, org.id, actor, "window_created", `corner:${c.id}|${dow}|${s}-${e}`);
+    await invalidateOrg(org.slug);
     return json({ ok: true }, 201);
   }
   if (res === "coordinators" && !rid) {
@@ -436,42 +512,137 @@ export async function purge(env: Env, nowSec = Math.floor(Date.now() / 1000)): P
     rate_purged: r[5]!.meta.changes, stale_applications_purged: r[6]!.meta.changes };
 }
 
+// ------------------------------------------------------------------ self-healing maintenance (cron)
+async function setStatus(env: Env, k: string, v: unknown): Promise<void> {
+  await env.DB.prepare("INSERT INTO system_status (k, v, at) VALUES (?,?,unixepoch()) ON CONFLICT(k) DO UPDATE SET v=excluded.v, at=excluded.at")
+    .bind(k, JSON.stringify(v)).run();
+}
+
+/** Key rotation, healed in the background: any row still sealed under DATA_KEY_PREV is re-sealed under DATA_KEY. */
+export async function rekey(env: Env, batch = 300): Promise<{ resealed: number; failed: number; pending: boolean }> {
+  if (!env.DATA_KEY_PREV) return { resealed: 0, failed: 0, pending: false };
+  let resealed = 0, failed = 0;
+  const reseal = async (aad: string, sealed: string): Promise<string | null> => {
+    try { await open(env.DATA_KEY, aad, sealed); return null; } catch { /* not under the current key */ }
+    try { return await seal(env.DATA_KEY, aad, await open(env.DATA_KEY_PREV!, aad, sealed)); } catch { failed++; return null; }
+  };
+  const vols = (await env.DB.prepare("SELECT id, org_id, name_enc, phone_enc FROM volunteers LIMIT ?").bind(batch)
+    .all<{ id: number; org_id: number; name_enc: string; phone_enc: string }>()).results;
+  for (const v of vols) {
+    const n = await reseal(`volunteers|name|${v.org_id}`, v.name_enc), ph = await reseal(`volunteers|phone|${v.org_id}`, v.phone_enc);
+    if (n || ph) {
+      await env.DB.prepare("UPDATE volunteers SET name_enc=?, phone_enc=? WHERE id=?").bind(n ?? v.name_enc, ph ?? v.phone_enc, v.id).run();
+      resealed++;
+    }
+  }
+  const walks = (await env.DB.prepare("SELECT id, org_id, callback_enc FROM walk_requests LIMIT ?").bind(batch)
+    .all<{ id: string; org_id: number; callback_enc: string }>()).results;
+  for (const w of walks) {
+    const c = await reseal(`walk|callback|${w.org_id}|${w.id}`, w.callback_enc);
+    if (c) { await env.DB.prepare("UPDATE walk_requests SET callback_enc=? WHERE id=?").bind(c, w.id).run(); resealed++; }
+  }
+  return { resealed, failed, pending: vols.length === batch || walks.length === batch };
+}
+
+/** Runs hourly. Each step is isolated: one failing step never blocks the others, and every outcome is recorded. */
+export async function maintain(env: Env): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {};
+  const step = async (name: string, fn: () => Promise<unknown>) => {
+    const t0 = Date.now();
+    try { out[name] = await fn(); await setStatus(env, name, { ok: true, result: out[name], ms: Date.now() - t0 }); }
+    catch (e) {
+      out[name] = { error: (e as Error).name };
+      log("error", "maintenance_step_failed", { step: name, err: (e as Error).name });
+      try { await setStatus(env, name, { ok: false, error: (e as Error).name, ms: Date.now() - t0 }); } catch { /* DB down: logged above */ }
+    }
+  };
+  await step("purge", () => purge(env));
+  await step("audit_verify", () => auditVerify(env));
+  await step("rekey", () => rekey(env));
+  log("info", "maintenance", { summary: JSON.stringify(out).slice(0, 500) });
+  return out;
+}
+
+/** Readiness: DB reachable, keys well-formed, maintenance recent and green, audit chain intact. No personal data. */
+async function health(env: Env): Promise<Response> {
+  const checks: Record<string, unknown> = {};
+  const keyOk = (k?: string) => { try { return !!k && atob(k).length >= 32; } catch { return false; } };
+  checks.keys = keyOk(env.DATA_KEY) && keyOk(env.HMAC_KEY) && (!env.DATA_KEY_PREV || keyOk(env.DATA_KEY_PREV));
+  checks.rotation_in_progress = !!env.DATA_KEY_PREV;
+  checks.access_configured = !env.ACCESS_AUD.startsWith("REPLACE") && !env.ACCESS_TEAM_DOMAIN.startsWith("REPLACE");
+  let dbOk = false;
+  try {
+    await retry(() => env.DB.prepare("SELECT 1").first());
+    dbOk = true;
+    const rows = (await env.DB.prepare("SELECT k, v, at FROM system_status").all<{ k: string; v: string; at: number }>()).results;
+    const now = Math.floor(Date.now() / 1000);
+    for (const r of rows) checks[r.k] = { ...JSON.parse(r.v), age_s: now - r.at };
+  } catch { /* reported below */ }
+  checks.db = dbOk;
+  const pg = checks.purge as { ok?: boolean; age_s?: number } | undefined;
+  const audit = checks.audit_verify as { ok?: boolean; result?: { ok?: boolean } } | undefined;
+  const problems: string[] = [];
+  if (!dbOk) problems.push("db_unreachable");
+  if (!checks.keys) problems.push("keys_invalid");
+  if (pg && (!pg.ok || (pg.age_s ?? 0) > 3 * 3600)) problems.push("maintenance_stale_or_failing");
+  if (audit && audit.result && audit.result.ok === false) problems.push("audit_chain_broken");
+  return json({ ok: problems.length === 0, version: VERSION, problems, checks }, problems.length ? 503 : 200);
+}
+
 // ------------------------------------------------------------------ router
+async function route(req: Request, env: Env, p: string[]): Promise<Response> {
+  if (!env.DATA_KEY || !env.HMAC_KEY) throw new HttpError(503, "not_configured");
+  if (req.method === "GET" && p[1] === "health" && p.length === 2) return json({ ok: true, version: VERSION });
+  if (req.method === "GET" && p[1] === "health" && p[2] === "ready") {
+    await limit(env, "health", clientIp(req), 120, 3600);
+    return await health(env);
+  }
+  if (req.method === "GET" && p[1] === "orgs" && p.length === 2) {
+    const { results } = await retry(() => env.DB.prepare("SELECT slug, name, borough FROM orgs WHERE active=1 ORDER BY name").all());
+    return json({ orgs: results });
+  }
+  if (p[1] === "o" && p[2]) {
+    if (req.method === "GET" && p.length === 3) return await publicOrg(env, p[2]);
+    if (req.method === "POST" && p[3] === "volunteer" && p.length === 4) return await volunteerApply(req, env, p[2]);
+    if (req.method === "POST" && p[3] === "walk" && p.length === 4) return await walkRequest(req, env, p[2]);
+  }
+  if (p[1] === "v" && req.method === "POST" && p[2] && p.length === 3) return await volunteerApi(req, env, p[2]);
+  if (p[1] === "c" && p[2] === "me" && req.method === "GET") {
+    const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
+    if (!id) throw new HttpError(401, "access_required");
+    const { results } = await env.DB.prepare(
+      "SELECT o.slug, o.name, c.role FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=?").bind(id.email).all();
+    return json({ email: id.email, orgs: results });
+  }
+  if (p[1] === "c" && p[2]) return await coordApi(req, env, p[2], p.slice(3));
+  throw new HttpError(404, "not_found");
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     const p = url.pathname.split("/").filter(Boolean);
     if (p[0] !== "api") return env.ASSETS.fetch(req);
-    try {
-      if (!env.DATA_KEY || !env.HMAC_KEY) throw new HttpError(503, "not_configured");
-      if (req.method === "GET" && p[1] === "health") return json({ ok: true });
-      if (req.method === "GET" && p[1] === "orgs" && p.length === 2) {
-        const { results } = await env.DB.prepare("SELECT slug, name, borough FROM orgs WHERE active=1 ORDER BY name").all();
-        return json({ orgs: results });
+    const rid = crypto.randomUUID();
+    const t0 = Date.now();
+    let res: Response;
+    try { res = await route(req, env, p); }
+    catch (e) {
+      if (e instanceof HttpError) res = json({ error: e.code, request_id: rid }, e.status);
+      else {
+        const dbg: Record<string, string> = env.DEBUG === "1" ? { msg: String((e as Error).message).slice(0, 200), at: String((e as Error).stack || "").split("\n")[1]?.trim().slice(0, 160) ?? "" } : {};
+        log("error", "unhandled", { rid, route: routeOf(url.pathname), err: (e as Error).name, ...dbg });   // never bodies or personal data
+        res = json({ error: "internal", request_id: rid }, 500);
       }
-      if (p[1] === "o" && p[2]) {
-        if (req.method === "GET" && p.length === 3) return await publicOrg(env, p[2]);
-        if (req.method === "POST" && p[3] === "volunteer" && p.length === 4) return await volunteerApply(req, env, p[2]);
-        if (req.method === "POST" && p[3] === "walk" && p.length === 4) return await walkRequest(req, env, p[2]);
-      }
-      if (p[1] === "v" && req.method === "POST" && p[2] && p.length === 3) return await volunteerApi(req, env, p[2]);
-      if (p[1] === "c" && p[2] === "me" && req.method === "GET") {
-        const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
-        if (!id) throw new HttpError(401, "access_required");
-        const { results } = await env.DB.prepare(
-          "SELECT o.slug, o.name, c.role FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=?").bind(id.email).all();
-        return json({ email: id.email, orgs: results });
-      }
-      if (p[1] === "c" && p[2]) return await coordApi(req, env, p[2], p.slice(3));
-      throw new HttpError(404, "not_found");
-    } catch (e) {
-      if (e instanceof HttpError) return json({ error: e.code }, e.status);
-      console.error("internal", (e as Error).name);   // never log bodies or personal data
-      return json({ error: "internal" }, 500);
     }
+    const out = new Response(res.body, res);
+    out.headers.set("x-request-id", rid);
+    if (res.status >= 500 || url.pathname.startsWith("/api/c/")) {
+      log(res.status >= 500 ? "error" : "info", "request", { rid, m: req.method, route: routeOf(url.pathname), s: res.status, ms: Date.now() - t0 });
+    }
+    return out;
   },
-  async scheduled(_c: ScheduledController, env: Env): Promise<void> {
-    const r = await purge(env);
-    console.log("purge", JSON.stringify(r));
+  async scheduled(_c: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(maintain(env));
   },
 } satisfies ExportedHandler<Env>;

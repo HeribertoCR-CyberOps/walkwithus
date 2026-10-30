@@ -12,7 +12,7 @@ const TEAM = "test.cloudflareaccess.com", AUD = "test-aud";
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const { publicKey: rogueKey, privateKey: roguePriv } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const KID = "k1";
-let proc; const DEVLOG = ".wrangler/test-dev.log"; let LOGFD; const devTail = () => { try { return readFileSync(DEVLOG, "utf8").slice(-3000); } catch { return ""; } };
+let proc, LOGFD; const DEVLOG = ".wrangler/test-dev.log";  const devTail = () => { try { return readFileSync(DEVLOG, "utf8").slice(-3000); } catch { return ""; } };
 
 const b64u = (b) => Buffer.from(b).toString("base64url");
 function jwt(claims, { key = privateKey, kid = KID, alg = "RS256" } = {}) {
@@ -61,18 +61,39 @@ function sqlFails(command) {
 }
 const nyDate = (plusDays) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(Date.now() + plusDays * 86400000));
 
+const KEY1 = randomBytes(32).toString("base64"), KEY2 = randomBytes(32).toString("base64"), HKEY = randomBytes(32).toString("base64");
+function writeVars(extra) {
+  const jwk = publicKey.export({ format: "jwk" });
+  writeFileSync(".dev.vars", [
+    `HMAC_KEY=${HKEY}`, `ACCESS_TEAM_DOMAIN=${TEAM}`, `ACCESS_AUD=${AUD}`,
+    `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] })}`, ...extra,
+  ].join("\n") + "\n");
+}
+async function startServer() {
+  LOGFD = openSync(DEVLOG, "a");
+  proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", PERSIST, "--test-scheduled", "--ip", "127.0.0.1"],
+    { stdio: ["ignore", LOGFD, LOGFD], env: { ...process.env, NO_COLOR: "1" }, detached: true });
+  for (let i = 0; i < 120; i++) {
+    try { const r = await fetch(BASE + "/api/health", { headers: { connection: "close" } }); if (r.ok) return; } catch {}
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error("wrangler dev did not start:\n" + devTail());
+}
+async function stopServer() {
+  try { process.kill(-proc.pid, "SIGTERM"); } catch {}
+  for (let i = 0; i < 60; i++) {
+    try { await fetch(BASE + "/api/health", { headers: { connection: "close" } }); } catch { return; }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error("server did not stop");
+}
+
 before(async () => {
   try { await fetch(BASE + "/api/health"); throw new Error(`port ${PORT} already in use — stop the other dev server first`); }
   catch (e) { if (String(e.message).startsWith("port")) throw e; }
   rmSync(PERSIST, { recursive: true, force: true });
-  const jwk = publicKey.export({ format: "jwk" });
-  writeFileSync(".dev.vars", [
-    `DATA_KEY=${randomBytes(32).toString("base64")}`,
-    `HMAC_KEY=${randomBytes(32).toString("base64")}`,
-    `ACCESS_TEAM_DOMAIN=${TEAM}`,
-    `ACCESS_AUD=${AUD}`,
-    `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] })}`,
-  ].join("\n") + "\n");
+  writeFileSync(DEVLOG, "");
+  writeVars([`DATA_KEY=${KEY1}`]);
   execFileSync("npx", ["wrangler", "d1", "migrations", "apply", "walkwithus", "--local", "--persist-to", PERSIST], { stdio: "ignore", timeout: 90000 });
   sql(`INSERT INTO orgs (id, slug, name, borough) VALUES (1,'crotona-test','Crotona Test Program','Bronx'), (2,'other-org','Other Org','Queens');
        INSERT INTO corners (id, org_id, label, cross_streets, lat, lon) VALUES
@@ -82,19 +103,12 @@ before(async () => {
        INSERT INTO windows (org_id, corner_id, dow, start_min, end_min) VALUES
          (1,1,0,0,1440),(1,1,1,0,1440),(1,1,2,0,1440),(1,1,3,0,1440),(1,1,4,0,1440),(1,1,5,0,1440),(1,1,6,0,1440),
          (1,2,1,450,525);
-       INSERT INTO coordinators (email, org_id, role) VALUES ('admin@org.test',1,'admin'), ('coord@org.test',1,'coordinator'), ('other@org.test',2,'admin');`);
-  LOGFD = openSync(DEVLOG, "w");
-  proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", PERSIST, "--test-scheduled", "--ip", "127.0.0.1"],
-    { stdio: ["ignore", LOGFD, LOGFD], env: { ...process.env, NO_COLOR: "1" }, detached: true });
-
-  for (let i = 0; i < 120; i++) {
-    try { const r = await fetch(BASE + "/api/health"); if (r.ok) return; } catch {}
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error("wrangler dev did not start:\n" + devTail());
+       INSERT INTO coordinators (email, org_id, role) VALUES ('admin@org.test',1,'admin'), ('coord@org.test',1,'coordinator'),
+         ('other@org.test',2,'admin'), ('bulk@org.test',1,'coordinator'), ('rot@org.test',1,'admin');`);
+  await startServer();
 });
-after(() => {
-  try { process.kill(-proc.pid, "SIGTERM"); } catch {}       // whole process group: npx -> wrangler -> workerd
+after(async () => {
+  await stopServer().catch(() => {});
   rmSync(".dev.vars", { force: true });
 });
 
@@ -315,4 +329,79 @@ test("cron purge: expired requests deleted, done walks and adult-minutes aggrega
   assert.equal(sql("SELECT COUNT(*) n FROM shifts")[0].n, 0);
   const agg = sql("SELECT SUM(walks_done) w, SUM(adult_minutes) m FROM coverage_daily")[0];
   assert.equal(agg.w, 1); assert.ok(agg.m > 0);
+});
+
+// ---------------------------------------------------------------- v1.1 hardening
+test("observability: every API response carries a request id and API-level CSP/HSTS", async () => {
+  const r = await req("/api/o/crotona-test");
+  assert.match(r.headers.get("x-request-id") || "", /^[0-9a-f-]{36}$/);
+  assert.match(r.headers.get("content-security-policy") || "", /default-src 'none'/);
+  assert.match(r.headers.get("strict-transport-security") || "", /max-age=63072000/);
+  const e = await req("/api/o/nope-nope");
+  assert.equal(e.j.request_id, e.headers.get("x-request-id"), "errors return the id so support can find the log line");
+});
+
+test("readiness probe reports maintenance and audit status without personal data", async () => {
+  const r = await req("/api/health/ready");
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.j.ok, true);
+  assert.equal(r.j.checks.db, true);
+  assert.equal(r.j.checks.keys, true);
+  assert.equal(r.j.checks.purge.ok, true, "cron purge ran in the previous test and recorded success");
+  assert.equal(r.j.checks.audit_verify.result.ok, true);
+  assert.ok(!/5550|Rivera|Osei|Diaz|@/.test(JSON.stringify(r.j)), "no personal data or emails in health");
+});
+
+test("public schedule is edge-cached and invalidated by admin changes", async () => {
+  await req("/api/c/crotona-test/windows", { method: "POST", token: ADMIN(), body: { corner_id: 2, dow: 2, start: "07:30", end: "08:45" } });
+  const a = await req("/api/o/crotona-test");
+  assert.equal(a.headers.get("x-cache"), "miss", "invalidated by the admin change");
+  const b = await req("/api/o/crotona-test");
+  assert.equal(b.headers.get("x-cache"), "hit");
+  assert.ok(b.j.windows.some((w) => w.corner_id === 2 && w.dow === 2));
+});
+
+test("NYC languages: Local Law 30 + West African call languages accepted; unknown codes fall back to English", async () => {
+  for (const lang of ["zh", "bn", "ht", "ar", "ur", "ak", "wo"]) {
+    const r = await req("/api/o/crotona-test/walk", { method: "POST",
+      body: { corner_id: 1, date: nyDate(3), time: "10:00", callback: `646-555-01${lang.charCodeAt(0) % 90 + 10}`, lang, consent: true } });
+    assert.equal(r.status, 201, lang + " " + JSON.stringify(r.j));
+    assert.equal(sql(`SELECT lang FROM walk_requests WHERE ref='${r.j.ref}'`)[0].lang, lang);
+  }
+  const x = await req("/api/o/crotona-test/walk", { method: "POST",
+    body: { corner_id: 1, date: nyDate(3), time: "10:15", callback: "646-555-0199", lang: "xx", consent: true } });
+  assert.equal(sql(`SELECT lang FROM walk_requests WHERE ref='${x.j.ref}'`)[0].lang, "en");
+});
+
+test("bulk-exfiltration ceiling: a coordinator can decrypt at most 30 numbers per hour; the 31st is refused and audited", async () => {
+  const vid = sql("SELECT id FROM volunteers WHERE org_id=1 ORDER BY id LIMIT 1")[0].id;
+  const codes = [];
+  for (let i = 0; i < 31; i++) codes.push((await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: jwt({ email: "bulk@org.test" }), body: {} })).status);
+  assert.deepEqual(codes.slice(0, 30), Array(30).fill(200));
+  assert.equal(codes[30], 429);
+  assert.equal(sql("SELECT COUNT(*) n FROM audit WHERE actor='bulk@org.test' AND action='reveal_throttled'")[0].n, 1);
+  assert.equal((await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: COORD(), body: {} })).status, 200, "limit is per coordinator");
+});
+
+test("key rotation drill: old ciphertext readable under DATA_KEY_PREV, cron re-seals, then the old key can be removed", async () => {
+  const ROT = () => jwt({ email: "rot@org.test" });
+  const vid = sql("SELECT id FROM volunteers WHERE org_id=1 ORDER BY id LIMIT 1 OFFSET 1")[0].id;
+  const before = (await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: ROT(), body: {} })).j.phone;
+  assert.match(before, /^\+1\d{10}$/);
+  const sealedBefore = sql(`SELECT phone_enc FROM volunteers WHERE id=${vid}`)[0].phone_enc;
+
+  await stopServer(); writeVars([`DATA_KEY=${KEY2}`, `DATA_KEY_PREV=${KEY1}`]); await startServer();
+  assert.equal((await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: ROT(), body: {} })).j.phone, before, "readable during rotation");
+  const ready = await req("/api/health/ready");
+  assert.equal(ready.j.checks.rotation_in_progress, true);
+  assert.equal((await fetch(BASE + "/__scheduled?cron=17+*+*+*+*", { headers: { connection: "close" } })).status, 200);
+  const rk = JSON.parse(sql("SELECT v FROM system_status WHERE k='rekey'")[0].v);
+  assert.equal(rk.ok, true); assert.ok(rk.result.resealed >= 1, JSON.stringify(rk)); assert.equal(rk.result.failed, 0);
+  assert.notEqual(sql(`SELECT phone_enc FROM volunteers WHERE id=${vid}`)[0].phone_enc, sealedBefore, "row re-sealed under the new key");
+
+  await stopServer(); writeVars([`DATA_KEY=${KEY2}`]); await startServer();
+  assert.equal((await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: ROT(), body: {} })).j.phone, before, "readable with only the new key");
+  const walkRow = sql("SELECT id FROM walk_requests LIMIT 1")[0];
+  const w = await req(`/api/c/crotona-test/walks/${walkRow.id}/reveal`, { method: "POST", token: ROT(), body: {} });
+  assert.match(w.j.callback, /^\+1\d{10}$/, "walk callbacks re-sealed too");
 });

@@ -5,12 +5,29 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run typecheck
+      - name: Runtime dependency audit (the Worker ships zero runtime dependencies)
+        run: npm audit --omit=dev --audit-level=low
       - run: npm test
+        env: { CI: "1", WRANGLER_SEND_METRICS: "false" }
+      - name: SBOM (CycloneDX)
+        run: npm sbom --sbom-format cyclonedx > sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom.cdx.json }
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm install --no-save playwright@1.56.1 && npx playwright@1.56.1 install --with-deps chromium
+      - run: npm run test:ui
         env: { CI: "1", WRANGLER_SEND_METRICS: "false" }
