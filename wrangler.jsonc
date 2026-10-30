@@ -1,0 +1,22 @@
+// Walk With Us — Cloudflare Workers + D1 + static assets. $0 on the free tier.
+// Secrets (never in this file):  wrangler secret put DATA_KEY   (base64, 32 random bytes — AES-256-GCM at rest)
+//                                wrangler secret put HMAC_KEY   (base64, 32 random bytes — keyed hashes for dedupe/rate limits)
+//                                wrangler secret put TURNSTILE_SECRET   (optional; enables bot check on public forms)
+{
+  "name": "walkwithus",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-01",
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "404-page" },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "walkwithus", "database_id": "REPLACE_WITH_D1_ID", "migrations_dir": "migrations" }
+  ],
+  "triggers": { "crons": ["17 * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    "APP_NAME": "Walk With Us",
+    "ACCESS_TEAM_DOMAIN": "REPLACE.cloudflareaccess.com",
+    "ACCESS_AUD": "REPLACE_WITH_ACCESS_AUD_TAG",
+    "RETENTION_HOURS": "72",
+    "TURNSTILE_SITEKEY": ""
+  }
+}

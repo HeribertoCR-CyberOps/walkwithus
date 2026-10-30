@@ -1,0 +1,65 @@
+:root {
+  --bg: #f7f6f2; --surface: #ffffff; --ink: #1d2320; --muted: #5b625e; --line: #dcdcd4;
+  --accent: #0f6b4f; --accent-ink: #ffffff; --danger: #b3261e; --danger-ink: #ffffff; --warn: #8a5a00; --focus: #1a5fb4;
+  --radius: 14px; --pad: 16px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111513; --surface: #1a201d; --ink: #edf0ee; --muted: #a9b1ac; --line: #2c3430;
+          --accent: #4fc79a; --accent-ink: #062016; --danger: #ff6b5f; --danger-ink: #2a0503; --warn: #f0b84a; --focus: #8ab4ff;
+          color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  padding: env(safe-area-inset-top) max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(16px, env(safe-area-inset-left)); }
+main { max-width: 720px; margin: 0 auto; padding-block: 12px 48px; display: grid; gap: 16px; }
+h1 { font-size: 1.5rem; margin: 0; line-height: 1.2; text-wrap: balance; }
+h2 { font-size: 1.15rem; margin: 0 0 8px; text-wrap: balance; }
+p { margin: 0 0 8px; }
+small, .muted { color: var(--muted); }
+a { color: var(--accent); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); }
+.sos { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.sos a { display: flex; align-items: center; justify-content: center; min-height: 56px; border-radius: var(--radius);
+  font-weight: 800; text-decoration: none; font-size: 1.15rem; }
+.sos .call911 { background: var(--danger); color: var(--danger-ink); font-size: 1.35rem; min-height: 64px; }
+.sos .other { background: var(--surface); color: var(--ink); border: 1px solid var(--line); font-weight: 600; font-size: 1rem; }
+@media (min-width: 560px) { .sos { grid-template-columns: 2fr 1fr 1fr; } }
+label { display: block; font-weight: 600; margin: 12px 0 4px; }
+input, select, button { font: inherit; }
+input[type=text], input[type=tel], input[type=date], input[type=email], input[type=number], select {
+  width: 100%; min-height: 48px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--ink); }
+.check { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; }
+.check input { width: 24px; height: 24px; margin-top: 2px; flex: 0 0 auto; }
+button, .btn { min-height: 48px; padding: 10px 18px; border-radius: 10px; border: 0; cursor: pointer; font-weight: 700;
+  background: var(--accent); color: var(--accent-ink); }
+button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button.danger { background: var(--danger); color: var(--danger-ink); }
+button:disabled { opacity: .55; cursor: progress; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.grid2 { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+.result { margin-top: 12px; padding: 12px; border-radius: 10px; border: 1px solid var(--line); }
+.result.ok { border-color: var(--accent); }
+.result.err { border-color: var(--danger); }
+.ref { font: 800 1.6rem/1.2 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .12em; }
+ul.plain { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.corner { border-top: 1px solid var(--line); padding-top: 8px; }
+.corner:first-child { border-top: 0; padding-top: 0; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .8rem; font-weight: 700; border: 1px solid var(--line); }
+.badge.ok { color: var(--accent); border-color: var(--accent); }
+.badge.warn { color: var(--warn); border-color: var(--warn); }
+.badge.bad { color: var(--danger); border-color: var(--danger); }
+.lang { display: flex; gap: 6px; }
+.lang button { min-height: 36px; padding: 4px 10px; font-size: .9rem; }
+header.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+details summary { cursor: pointer; font-weight: 700; min-height: 32px; }
+table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.scroll { overflow-x: auto; }
+code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; word-break: break-all; }
+.hidden { display: none !important; }
+main.wide { max-width: 1080px; }

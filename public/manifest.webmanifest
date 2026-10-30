@@ -1,0 +1,11 @@
+{
+  "name": "Walk With Us",
+  "short_name": "Walk With Us",
+  "description": "Free, community-run safe passage. Adults on corners at school times. No tracking.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f6f2",
+  "theme_color": "#0f6b4f",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
