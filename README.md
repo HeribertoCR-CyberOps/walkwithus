@@ -37,7 +37,7 @@ Then: protect `/c.html*` and `/api/c/*` with a Cloudflare Access application, pu
 ## Test
 
 ```bash
-npm test     # 22 end-to-end tests against the real Workers runtime and a local D1
+npm test     # 18 end-to-end tests against the real Workers runtime and a local D1
 npm run typecheck
 ```
 

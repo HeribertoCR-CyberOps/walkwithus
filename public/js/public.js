@@ -55,8 +55,12 @@ function walkCard() {
   const fillTimes = () => {
     const cid = Number(cornerSel.value), dow = dowOf(date.value);
     const opts = [];
+    // today: offer only slots that haven't passed yet (NY time)
+    const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+      .formatToParts(new Date()).map((x) => [x.type, x.value]));
+    const nowMin = date.value === today() ? +p.hour * 60 + +p.minute : -1;
     for (const w of state.windows.filter((x) => x.corner_id === cid && x.dow === dow))
-      for (let m = w.start_min; m < w.end_min; m += 15) opts.push(hhmm(m));
+      for (let m = w.start_min; m < w.end_min; m += 15) if (m >= nowMin) opts.push(hhmm(m));
     time.replaceChildren(...(opts.length ? opts.map((t) => el("option", { value: t, text: t }))
       : [el("option", { value: "", text: "—" })]));
   };

@@ -63,3 +63,4 @@ th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line
 code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; word-break: break-all; }
 .hidden { display: none !important; }
 main.wide { max-width: 1080px; }
+#content { display: grid; gap: 16px; }

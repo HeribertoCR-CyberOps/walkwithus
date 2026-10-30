@@ -4,7 +4,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { generateKeyPairSync, sign, randomBytes, randomUUID } from "node:crypto";
-import { writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync, openSync, readFileSync } from "node:fs";
 
 process.env.CI = "1"; process.env.WRANGLER_SEND_METRICS = "false";
 const PORT = 8799, BASE = `http://127.0.0.1:${PORT}`, PERSIST = ".wrangler/test-state";
@@ -12,7 +12,7 @@ const TEAM = "test.cloudflareaccess.com", AUD = "test-aud";
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const { publicKey: rogueKey, privateKey: roguePriv } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const KID = "k1";
-let proc, devLog = "";
+let proc; const DEVLOG = ".wrangler/test-dev.log"; let LOGFD; const devTail = () => { try { return readFileSync(DEVLOG, "utf8").slice(-3000); } catch { return ""; } };
 
 const b64u = (b) => Buffer.from(b).toString("base64url");
 function jwt(claims, { key = privateKey, kid = KID, alg = "RS256" } = {}) {
@@ -26,7 +26,7 @@ const ADMIN = () => jwt({ email: "admin@org.test" });
 const COORD = () => jwt({ email: "coord@org.test" });
 
 async function req(path, { method = "GET", body, token, ip, headers = {} } = {}) {
-  const h = { ...headers };
+  const h = { connection: "close", ...headers };   // no keep-alive reuse: sync CLI calls let idle sockets go stale
   if (body !== undefined) h["content-type"] = "application/json";
   if (token) h["cf-access-jwt-assertion"] = token;
   h["cf-connecting-ip"] = ip || "203.0.113." + Math.floor(Math.random() * 250);
@@ -83,14 +83,15 @@ before(async () => {
          (1,1,0,0,1440),(1,1,1,0,1440),(1,1,2,0,1440),(1,1,3,0,1440),(1,1,4,0,1440),(1,1,5,0,1440),(1,1,6,0,1440),
          (1,2,1,450,525);
        INSERT INTO coordinators (email, org_id, role) VALUES ('admin@org.test',1,'admin'), ('coord@org.test',1,'coordinator'), ('other@org.test',2,'admin');`);
+  LOGFD = openSync(DEVLOG, "w");
   proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", PERSIST, "--test-scheduled", "--ip", "127.0.0.1"],
-    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NO_COLOR: "1" }, detached: true });
-  proc.stdout.on("data", (d) => (devLog += d)); proc.stderr.on("data", (d) => (devLog += d));
+    { stdio: ["ignore", LOGFD, LOGFD], env: { ...process.env, NO_COLOR: "1" }, detached: true });
+
   for (let i = 0; i < 120; i++) {
     try { const r = await fetch(BASE + "/api/health"); if (r.ok) return; } catch {}
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error("wrangler dev did not start:\n" + devLog.slice(-2000));
+  throw new Error("wrangler dev did not start:\n" + devTail());
 });
 after(() => {
   try { process.kill(-proc.pid, "SIGTERM"); } catch {}       // whole process group: npx -> wrangler -> workerd
@@ -307,8 +308,8 @@ test("cron purge: expired requests deleted, done walks and adult-minutes aggrega
   const before = sql("SELECT COUNT(*) n FROM walk_requests")[0].n;
   assert.ok(before > 0);
   let r;
-  try { r = await fetch(BASE + "/__scheduled?cron=17+*+*+*+*"); }
-  catch (e) { throw new Error("dev server unreachable; last log:\n" + devLog.slice(-3000)); }
+  try { r = await fetch(BASE + "/__scheduled?cron=17+*+*+*+*", { headers: { connection: "close" } }); }
+  catch (e) { throw new Error("dev server unreachable; last log:\n" + devTail()); }
   assert.equal(r.status, 200);
   assert.equal(sql("SELECT COUNT(*) n FROM walk_requests")[0].n, 0);
   assert.equal(sql("SELECT COUNT(*) n FROM shifts")[0].n, 0);
