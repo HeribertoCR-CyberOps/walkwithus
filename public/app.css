@@ -23,7 +23,8 @@ a { color: var(--accent); }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--pad); }
 .sos { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .sos a { display: flex; align-items: center; justify-content: center; min-height: 56px; border-radius: var(--radius);
-  font-weight: 800; text-decoration: none; font-size: 1.15rem; }
+  font-weight: 800; text-decoration: none; font-size: 1.15rem; text-align: center; padding: 8px 12px; line-height: 1.25; }
+.nowrap { white-space: nowrap; }
 .sos .call911 { background: var(--danger); color: var(--danger-ink); font-size: 1.35rem; min-height: 64px; }
 .sos .other { background: var(--surface); color: var(--ink); border: 1px solid var(--line); font-weight: 600; font-size: 1rem; }
 @media (min-width: 560px) { .sos { grid-template-columns: 2fr 1fr 1fr; } }

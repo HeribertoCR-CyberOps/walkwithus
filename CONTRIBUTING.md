@@ -13,6 +13,8 @@ Thank you for helping. Three kinds of contribution matter most, in this order:
 - **The Worker has zero runtime dependencies.** Dev tooling only.
 - **Rule of Two stays in the database.** Walks always need two approved adults.
 - Data minimization beats features. If in doubt, collect less.
+- **Tests come with the change.** New functionality and every bug fix add or extend an automated test in `test/` (end-to-end, browser or property-based); a pull request without one is not merged unless it changes only documentation.
+- **Coding standard:** TypeScript in `strict` mode with `noUncheckedIndexedAccess` (`npm run typecheck` must be clean), ES modules, no runtime dependencies, `.editorconfig` formatting. User-facing text goes in `public/js/strings.js`, never inline.
 
 ## Development
 

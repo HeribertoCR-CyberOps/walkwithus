@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.3 — 2026-10-31
+- **Walk form after hours:** once the last slot of the day has passed, the form now moves to the next day with open times. Before, it showed an empty time list with no explanation. If a family picks a day with nothing left, the list says so in their language (new string `no_times`, all 11 languages; non-English drafts pending native review).
+- **Emergency buttons:** phone numbers no longer break across lines ("1-800-577-TIPS" stays whole), and button text is centered with padding.
+- Service worker cache bumped (`wwu-v4`) so installed copies pick up the new interface.
+- Docs: `docs/API.md`, a complete HTTP API reference checked against the code. CONTRIBUTING now states the test policy and coding standard, and the PR template requires tests.
+- Tests: browser check for the after-hours date advance (fixed clock) and the one-line tip number.
+
 ## 1.1.2 — 2026-10-31
 - **Fix:** `randomString` threw for lengths above 32,768 characters because WebCrypto caps one `getRandomValues` call at 65,536 bytes. Random bytes are now drawn in chunks. Found by the new property tests; production only requests 6–43 characters, so the live service was never affected.
 - **Property-based tests** (fast-check, 1,000 generated cases per property in CI): seal/open round-trip for any Unicode, fresh IV per value, AAD binding across rows/fields/orgs, wrong-key rejection, any single-bit tamper detected, malformed ciphertext rejected, HMAC separation, base64/base64url round-trip, alphabet and length of random strings, chi-square test for modulo bias, 256-bit capability tokens, constant-time compare equals `===`.

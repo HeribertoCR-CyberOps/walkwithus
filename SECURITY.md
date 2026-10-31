@@ -27,7 +27,7 @@ Zero runtime dependencies in the Worker. CI pins every GitHub Action to a commit
 | Compromised coordinator account | Bulk export of contacts | Cloudflare Access (SSO, MFA by policy); each reveal is a separate, audited action; data volume bounded by 72 h retention (≈ λ·W rows). |
 | Database leak | Read personal data | AES-256-GCM per field with row-bound AAD; key held only as a Worker secret. |
 | Spam / flooding | Exhaust coordinators | Per-network and per-number rate limits with daily-salted keyed hashes; optional Turnstile. |
-| Insider tampering with history | Hide an action | Append-only hash chain; UPDATE/DELETE blocked; `UNIQUE(prev)` prevents forks; monthly verification. |
+| Insider tampering with history | Hide an action | Append-only hash chain; UPDATE/DELETE blocked; `UNIQUE(prev)` prevents forks; verified hourly by maintenance and on demand. |
 | Third-party tracking | Profile families | No third-party requests at all; strict CSP; `Permissions-Policy` denies geolocation/camera/mic. |
 
 ## Out of scope

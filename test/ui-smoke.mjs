@@ -73,6 +73,24 @@ for (const who of ["lead@demo.test", "coord@demo.test"]) {
   await check(`coordinator ${who}`, { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok(who) } }, ready: "text=Corners right now" },
     B + "/c.html?o=demo", async (pg, text) => { assert.equal(/Admin/.test(text), who.startsWith("lead"), "admin section only for admins"); });
 }
+// After the last slot of the day (20:00 NY), the walk form must move to the next day with open times instead of showing an empty list.
+await (async () => {
+  const label = "walk form skips a day with no times left";
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const pg = await ctx.newPage();
+  try {
+    await pg.clock.setFixedTime(new Date("2026-10-30T20:00:00-04:00"));
+    await pg.goto(B + "/?o=demo"); await pg.waitForSelector("#wh");
+    const r = await pg.evaluate(() => ({ date: document.getElementById("w-date").value,
+      first: [...document.querySelectorAll("#w-time option")].map((o) => o.value)[0] }));
+    assert.deepEqual(r, { date: "2026-10-31", first: "07:30" });
+    // The emergency tip number must render on one line.
+    const lines = await pg.$eval("#sostips .nowrap", (n) => n.getClientRects().length);
+    assert.equal(lines, 1, "tip number wrapped");
+    console.log("ok  ", label);
+  } catch (e) { failures.push(label); console.log("FAIL", label, "—", e.message.split("\n")[0]); }
+  await ctx.close();
+})();
 // Offline: after one visit, the shell, the 911 link and the last schedule still render with no network.
 await (async () => {
   const label = "offline after first visit";

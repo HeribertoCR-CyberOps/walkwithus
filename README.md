@@ -20,7 +20,7 @@ Trained adult volunteers on public corners at school times — the model that cu
 - Installable on any phone from a QR code. Works offline after the first visit. No ads, trackers, third-party requests — and **no AI** ([policy](docs/AI-POLICY.md)).
 - Self-healing operations: edge-cached schedule that survives a database outage, hourly maintenance with recorded results, background key rotation, readiness endpoint, external monitor ([SLO](docs/SLO.md)).
 
-See [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the design and its mathematical guarantees, and [`docs/AUDIT.md`](docs/AUDIT.md) for the security and reliability audit.
+See [`docs/API.md`](docs/API.md) for the HTTP API, [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the design and its mathematical guarantees, and [`docs/AUDIT.md`](docs/AUDIT.md) for the security and reliability audit.
 
 ## For organizations
 
