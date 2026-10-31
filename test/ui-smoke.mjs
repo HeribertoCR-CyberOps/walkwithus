@@ -4,7 +4,7 @@
 // Run: npm run test:ui   (needs Playwright + Chromium: `npx playwright@1.56.1 install --with-deps chromium` in CI)
 import { spawn, execFileSync } from "node:child_process";
 import { randomBytes, generateKeyPairSync, sign } from "node:crypto";
-import { writeFileSync, openSync, rmSync } from "node:fs";
+import { writeFileSync, openSync, rmSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 
@@ -17,7 +17,7 @@ catch { ({ chromium } = createRequire("/opt/node22/lib/node_modules/")("playwrig
 const P = ".wrangler/ui-smoke", PORT = 8803, B = `http://127.0.0.1:${PORT}`;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = publicKey.export({ format: "jwk" });
-rmSync(P, { recursive: true, force: true });
+rmSync(P, { recursive: true, force: true }); mkdirSync(".wrangler", { recursive: true });
 writeFileSync(".dev.vars", [`DATA_KEY=${randomBytes(32).toString("base64")}`, `HMAC_KEY=${randomBytes(32).toString("base64")}`,
   "ACCESS_TEAM_DOMAIN=t.cloudflareaccess.com", "ACCESS_AUD=a", `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: "k", alg: "RS256" }] })}`].join("\n") + "\n");
 execFileSync("npx", ["wrangler", "d1", "migrations", "apply", "walkwithus", "--local", "--persist-to", P], { stdio: "ignore" });

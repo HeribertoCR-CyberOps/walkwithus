@@ -4,7 +4,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { generateKeyPairSync, sign, randomBytes, randomUUID } from "node:crypto";
-import { writeFileSync, rmSync, openSync, readFileSync } from "node:fs";
+import { writeFileSync, rmSync, openSync, readFileSync, mkdirSync } from "node:fs";
 
 process.env.CI = "1"; process.env.WRANGLER_SEND_METRICS = "false";
 const PORT = 8799, BASE = `http://127.0.0.1:${PORT}`, PERSIST = ".wrangler/test-state";
@@ -12,7 +12,7 @@ const TEAM = "test.cloudflareaccess.com", AUD = "test-aud";
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const { publicKey: rogueKey, privateKey: roguePriv } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const KID = "k1";
-let proc, LOGFD; const DEVLOG = ".wrangler/test-dev.log";  const devTail = () => { try { return readFileSync(DEVLOG, "utf8").slice(-3000); } catch { return ""; } };
+let proc, LOGFD; const DEVLOG = ".wrangler/test-dev.log"; mkdirSync(".wrangler", { recursive: true });  const devTail = () => { try { return readFileSync(DEVLOG, "utf8").slice(-3000); } catch { return ""; } };
 
 const b64u = (b) => Buffer.from(b).toString("base64url");
 function jwt(claims, { key = privateKey, kid = KID, alg = "RS256" } = {}) {
