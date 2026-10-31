@@ -1,6 +1,6 @@
 # Volunteer briefing (15 minutes, in person, before the first shift)
 
-Read it aloud. The volunteer confirms each point. The coordinator approves them in the dashboard only after this briefing.
+Read it aloud. The volunteer confirms each point. An admin of the program approves them in the dashboard only after this briefing (coordinators cannot approve volunteers).
 
 ## Your job
 Be a calm, visible adult at your corner during the published hours. Your presence is the protection. You are a neighbor, not security and not police.
