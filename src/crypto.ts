@@ -81,7 +81,8 @@ export function randomString(len: number, alphabet: string): string {
   const limit = 256 - (256 % n);
   let out = "";
   while (out.length < len) {
-    const buf = crypto.getRandomValues(new Uint8Array(len * 2));
+    // WebCrypto caps one call at 65,536 bytes; draw in chunks so any length works.
+    const buf = crypto.getRandomValues(new Uint8Array(Math.min(65536, (len - out.length) * 2)));
     for (const b of buf) {
       if (b < limit) out += alphabet[b % n];
       if (out.length === len) break;

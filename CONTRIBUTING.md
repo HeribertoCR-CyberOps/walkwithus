@@ -20,7 +20,8 @@ Thank you for helping. Three kinds of contribution matter most, in this order:
 nvm use            # Node 22 (.nvmrc)
 npm ci
 npm test           # 24 end-to-end tests: real Workers runtime + local D1
-npm run test:ui    # browser checks in every language, RTL, offline (needs Playwright 1.56.1 + Chromium)
+npm run test:property  # property-based tests of the crypto core
+npm run test:ui    # browser checks in every language, RTL, offline (first time: npx playwright install chromium)
 npm run typecheck
 npm run dev        # http://127.0.0.1:8787 — seed a local org as in test/ui-smoke.mjs
 ```

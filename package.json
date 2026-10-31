@@ -1,6 +1,6 @@
 {
   "name": "walkwithus",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "Walk With Us — free, privacy-first safe-passage coordination for community organizations. Coordinates adults; never tracks children.",
   "license": "AGPL-3.0-only",
@@ -15,10 +15,13 @@
     "test:ui": "node test/ui-smoke.mjs",
     "deploy:ssp": "wrangler deploy -c wrangler.ssp.jsonc",
     "db:migrate:ssp": "wrangler d1 migrations apply walkwithus --remote -c wrangler.ssp.jsonc",
-    "monitor": "node scripts/monitor.mjs"
+    "monitor": "node scripts/monitor.mjs",
+    "test:property": "node --test test/property.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261031.1",
+    "fast-check": "4.10.2",
+    "playwright": "1.56.1",
     "typescript": "5.9.3",
     "wrangler": "4.156.0"
   },
