@@ -23,6 +23,7 @@ const probe = () => {
 
 // Probe → what it means and what to do first. Keep in step with docs/DEPLOY.md §6.
 const RUNBOOK = {
+  cloudflare: "Cloudflare itself refused the probe (detail starts with cloudflare_). Usually the zone's bot protection challenging the monitor's data-center address, not an outage: check Security → Events for the ray id, then add a WAF skip/allow rule for the monitor (user agent walkwithus-monitor) or lower Browser Integrity Check / security level for /api/health*. Confirm real visitors are unaffected by loading the site from a phone.",
   liveness: "The Worker is not answering. Check https://www.cloudflarestatus.com, then `npx wrangler deployments list -c wrangler.ssp.jsonc`; if the latest deploy is the cause, `npx wrangler rollback -c wrangler.ssp.jsonc`.",
   readiness: "The Worker answers but reports problems (see `problems` in /api/health/ready). `db_unreachable`: D1 incident or quota (Workers Free fails queries past daily limits; Paid fixes it). `maintenance_stale_or_failing`: the hourly cron is not running or failing; check Workers → Logs for `maintenance_step_failed`. `audit_chain_broken`: stop and investigate; do not edit the audit table. `keys_invalid`: DATA_KEY/HMAC_KEY secret missing or malformed.",
   app_shell: "The home page or its security header changed. Confirm the last deploy and that `public/_headers` still sets the CSP `default-src 'none'`.",
@@ -59,7 +60,7 @@ if (run.ok || !run.confirmed?.length) {
   process.exit(0);
 }
 
-const lines = run.confirmed.map((r) => `- **${r.name}** failed twice (status ${r.status || "none"}${r.detail && r.detail !== `status ${r.status}` ? `, ${r.detail}` : ""}).\n  Next step: ${RUNBOOK[r.name] || "see docs/DEPLOY.md §6."}`);
+const lines = run.confirmed.map((r) => `- **${r.name}** failed twice (status ${r.status || "none"}${r.detail && r.detail !== `status ${r.status}` ? `, ${r.detail}` : ""}).\n  Next step: ${(/cloudflare_/.test(r.detail || "") ? RUNBOOK.cloudflare : RUNBOOK[r.name]) || "see docs/DEPLOY.md §6."}`);
 const body = `**${base}** failed health probes at ${stamp} (confirmed by a retry 30 s later).\n\n${lines.join("\n")}\n\n` +
   `Full runbook: docs/DEPLOY.md §6 (debugging) and docs/SLO.md. This issue closes itself when every probe passes again.`;
 if (!open) {

@@ -34,7 +34,12 @@ for (const [name, path, ok] of probes) {
     const text = await r.text();
     let body = {}; try { body = JSON.parse(text); } catch {}
     pass = !!ok(r, body, text);
-    if (!pass) detail = (body.problems || []).join(",") || `status ${status}`;
+    if (!pass) {
+      // Say WHO refused: Cloudflare marks its own challenges/blocks with cf-mitigated; the app answers JSON with an error code.
+      const mitigated = r.headers.get("cf-mitigated");
+      detail = (body.problems || []).join(",") || (mitigated ? `cloudflare_${mitigated}` : body.error ? `app_${body.error}` : `status ${status}`);
+      if (!body.problems && !body.error) detail += ` server=${r.headers.get("server") || "?"} ray=${r.headers.get("cf-ray") || "?"} body=${JSON.stringify(text.slice(0, 80))}`;
+    }
   } catch (e) { detail = e.name; }
   results.push({ name, pass, status, ms: Math.round(performance.now() - t0), detail });
 }
