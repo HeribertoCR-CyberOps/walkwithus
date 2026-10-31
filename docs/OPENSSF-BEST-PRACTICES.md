@@ -76,7 +76,7 @@ Base URL used below: `R = https://github.com/HeribertoCR-CyberOps/walkwithus`
 | crypto_working, crypto_weaknesses | Met | No MD5, SHA-1, DES, RC4 or CBC; AES-GCM with a fresh 96-bit IV per value and row-bound AAD. |
 | crypto_pfs | N/A | The application performs no key agreement; TLS (with forward secrecy) is terminated by Cloudflare. |
 | crypto_password_storage | N/A | The software stores no passwords. Coordinators authenticate through Cloudflare Access (SSO/one-time code); volunteers use 256-bit capability tokens stored only as SHA-256 hashes. |
-| crypto_random | Met | All keys, IVs, tokens and codes come from `crypto.getRandomValues`, with rejection sampling to avoid bias. Property-tested, including a chi-square bias test: test/property.test.mjs |
+| crypto_random | Met | All keys, IVs, tokens and codes come from `crypto.getRandomValues`, with rejection sampling to avoid bias. Property-tested, including a chi-square bias test: test/property.test.ts |
 | delivery_mitm | Met | Code delivered over HTTPS/SSH from GitHub; the app is served over HTTPS with HSTS. |
 | delivery_unsigned | Met | No hashes are fetched over HTTP; npm registry signatures and attestations are verified in CI (`npm audit signatures`). |
 | vulnerabilities_fixed_60_days, vulnerabilities_critical_fixed | Met | `npm audit`: 0 vulnerabilities; the deployed Worker has zero runtime dependencies; Dependabot security updates on. |

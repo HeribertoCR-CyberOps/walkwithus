@@ -27,8 +27,9 @@ execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--pe
    INSERT INTO corners (id,org_id,label,cross_streets,lat,lon) VALUES (1,1,'Corner A','Example Ave & 1st St',40.84,-73.89),(2,1,'Corner B','Example Ave & 2nd St',40.841,-73.891);
    INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${win};
    INSERT INTO coordinators (email,org_id,role) VALUES ('lead@demo.test',1,'admin'), ('coord@demo.test',1,'coordinator');`], { stdio: "ignore" });
+const LOGFD = openSync(".wrangler/ui-smoke.log", "w");
 const proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", P, "--ip", "127.0.0.1"],
-  { stdio: ["ignore", openSync(".wrangler/ui-smoke.log", "w"), openSync(".wrangler/ui-smoke.log", "a")], detached: true });
+  { stdio: ["ignore", LOGFD, LOGFD], detached: true });
 const stop = () => { try { process.kill(-proc.pid, "SIGTERM"); } catch {} rmSync(".dev.vars", { force: true }); };
 process.on("exit", stop);
 for (let i = 0; i < 90; i++) { try { if ((await fetch(B + "/api/health")).ok) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
@@ -72,6 +73,20 @@ await check("volunteer page", { ready: "h1" }, B + "/v.html", async (pg, text) =
 for (const who of ["lead@demo.test", "coord@demo.test"]) {
   await check(`coordinator ${who}`, { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok(who) } }, ready: "text=Corners right now" },
     B + "/c.html?o=demo", async (pg, text) => { assert.equal(/Admin/.test(text), who.startsWith("lead"), "admin section only for admins"); });
+}
+// A crafted ?o= value must never turn into an API request outside /api/o/<valid-slug> or /api/c/<valid-slug>.
+for (const [label, url] of [["family page rejects crafted org slug", "/?o=..%2F..%2Fhealth"], ["coordinator page rejects crafted org slug", "/c.html?o=demo%2Fvolunteers%2F1%2Fsuspend"]]) {
+  const ctx = await browser.newContext({ extraHTTPHeaders: { "cf-access-jwt-assertion": tok("lead@demo.test") } });
+  const pg = await ctx.newPage(); const hits = [];
+  pg.on("request", (r) => { const u = new URL(r.url()); if (u.pathname.startsWith("/api/")) hits.push(u.pathname); });
+  try {
+    await pg.goto(B + url); await pg.waitForLoadState("networkidle");
+    const bad = hits.filter((h) => !/^\/api\/(orgs|o\/demo|c\/me|c\/demo\/dashboard)$/.test(h));
+    assert.ok(hits.length > 0, "page made no API calls");
+    assert.deepEqual(bad, [], "unexpected API paths: " + bad.join(", "));
+    console.log("ok  ", label);
+  } catch (e) { failures.push(label); console.log("FAIL", label, "—", e.message.split("\n")[0]); }
+  await ctx.close();
 }
 // After the last slot of the day (20:00 NY), the walk form must move to the next day with open times instead of showing an empty list.
 await (async () => {

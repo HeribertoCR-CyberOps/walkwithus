@@ -25,7 +25,7 @@ export interface Env {
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.1.3";
+const VERSION = "1.1.4";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)

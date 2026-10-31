@@ -1,5 +1,5 @@
 // Caches the app shell only. API responses are never cached (they're per-request and may be sensitive).
-const V = "wwu-v4";
+const V = "wwu-v5";
 const SHELL = ["/", "/app.css", "/js/i18n.js", "/js/public.js", "/js/strings.js", "/icon.svg", "/manifest.webmanifest", "/privacy"];
 self.addEventListener("install", (e) => e.waitUntil(caches.open(V).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener("activate", (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== V).map((k) => caches.delete(k)))).then(() => self.clients.claim())));

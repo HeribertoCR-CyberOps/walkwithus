@@ -108,7 +108,7 @@ function walkCard() {
     if (!form.checkValidity() || !time.value) { result(box, false, T().required); return; }
     btn.disabled = true;
     try {
-      const r = await api(`/api/o/${state.org.slug}/walk`, "POST",
+      const r = await api(`/api/o/${encodeURIComponent(state.org.slug)}/walk`, "POST",
         { corner_id: Number(cornerSel.value), date: date.value, time: time.value, callback: cb.value, lang: lg.value, consent: true });
       const del = new Date(r.deletes_at * 1000).toLocaleString(L, { timeZone: "America/New_York" });
       result(box, true, el("p", { text: T().sent }), el("p", { class: "ref", dir: "ltr", text: r.ref }), el("p", { text: r.meeting_point }),
@@ -145,7 +145,7 @@ function volunteerCard() {
     if (!form.checkValidity()) { result(box, false, T().required); return; }
     btn.disabled = true;
     try {
-      await api(`/api/o/${state.org.slug}/volunteer`, "POST", { name: name.value, phone: ph.value,
+      await api(`/api/o/${encodeURIComponent(state.org.slug)}/volunteer`, "POST", { name: name.value, phone: ph.value,
         corners: prefs.filter((p) => p.checked).map((p) => Number(p.value)), briefing_ack: true });
       result(box, true, T().applied); form.reset();
     } catch (err) { result(box, false, errText(err)); }
@@ -171,7 +171,8 @@ function privacyCard() {
 async function render() {
   chrome();
   const content = document.getElementById("content");
-  const slug = q.get("o");
+  const raw = q.get("o");
+  const slug = raw && /^[a-z0-9-]{3,40}$/.test(raw) ? raw : null; // same rule as the server; never put raw input in a URL path
   try {
     if (!slug) {
       const { orgs } = await api("/api/orgs");

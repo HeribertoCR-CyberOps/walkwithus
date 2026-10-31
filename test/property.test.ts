@@ -1,9 +1,9 @@
 // Property-based tests (fast-check) for the cryptographic core. Each property runs on hundreds of generated inputs,
 // including empty strings, astral-plane Unicode, RTL text and long values, and shrinks any failure to a minimal case.
-// Run: npm run test:property   (Node 22.18+ strips the TypeScript types in src/crypto.ts natively)
+// Run: npm run test:property   (Node 22.18+ runs this .ts file and src/crypto.ts natively by stripping types)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fc from "fast-check";
+import fc from 'fast-check';
 import { seal, open, hmac, b64, unb64, b64url, unb64url, randomString, ctEqual, REF_ALPHABET, capabilityToken } from "../src/crypto.ts";
 
 const key = () => fc.uint8Array({ minLength: 32, maxLength: 32 }).map((u) => b64(u));
