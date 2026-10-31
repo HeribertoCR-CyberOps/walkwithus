@@ -20,10 +20,9 @@ catch { pw = createRequire("/opt/node22/lib/node_modules/")("playwright"); }
 const chromium = pw[ENGINE];
 if (!chromium) throw new Error("unknown ENGINE " + ENGINE);
 // WebKit applies the CSP's upgrade-insecure-requests even to 127.0.0.1 (Chromium and Firefox exempt loopback), so the
-// WebKit run serves the app over local HTTPS, exactly as production does. Loopback-only, self-signed: the test process and
-// browser contexts accept that one certificate; nothing else in the run relaxes TLS.
+// WebKit run serves the app over local HTTPS, exactly as production does. The dev server's certificate is self-signed, so
+// only the Playwright contexts that talk to this loopback server accept it; Node's own TLS validation is never changed.
 const PROTO = ENGINE === "webkit" ? "https" : "http";
-if (PROTO === "https") process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 const P = ".wrangler/ui-smoke", PORT = 8803, B = `${PROTO}://127.0.0.1:${PORT}`;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = publicKey.export({ format: "jwk" });
@@ -42,7 +41,11 @@ const proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT),
   { stdio: ["ignore", LOGFD, LOGFD], detached: true });
 const stop = () => { try { process.kill(-proc.pid, "SIGTERM"); } catch {} rmSync(".dev.vars", { force: true }); };
 process.on("exit", stop);
-for (let i = 0; i < 90; i++) { try { if ((await fetch(B + "/api/health")).ok) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
+{ // wait for the dev server through a Playwright request context scoped to this loopback origin
+  const probe = await pw.request.newContext({ baseURL: B, ignoreHTTPSErrors: PROTO === "https" });
+  for (let i = 0; i < 90; i++) { try { if ((await probe.get("/api/health")).ok()) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
+  await probe.dispose();
+}
 
 const b64u = (x) => Buffer.from(x).toString("base64url");
 const tok = (email) => { const h = b64u(JSON.stringify({ alg: "RS256", kid: "k" })), p = b64u(JSON.stringify({ iss: "https://t.cloudflareaccess.com", aud: ["a"], email, exp: Math.floor(Date.now() / 1000) + 3600 }));
