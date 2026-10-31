@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.8 — 2026-10-31
+**A family never sees a raw "HTTP 403" when Cloudflare's bot check intercepts a request.**
+- When the network edge answers an API call with its own challenge page (`cf-mitigated` header), the family and volunteer pages now show, in the visitor's language, "A security check is needed. Reload the page, then try again," with a **Reload page** button, the program's phone and the 911 link. A full reload lets the browser complete the human check; code cannot.
+- The monitor's incident issue explains this failure (`cloudflare_challenge`) separately from an app outage, with the dashboard fix.
+- Tester guide: admins, not coordinators, approve volunteers.
+- Public contact address (home page, trademark policy) is now intake@savvysolutionpros.com.
+- New browser test intercepts a walk request with a simulated challenge and checks the message, the 911 link and the working reload, in Chromium and WebKit.
+
 ## 1.1.7 — 2026-10-31
 **Security hardening from an independent audit, accessibility verification in CI, ownership and naming policy.** Full findings table: `docs/AUDIT.md` → "Independent review — v1.1.7".
 - **Rate limits** are keyed on the client network (IPv4 address or IPv6 /64), closing a bypass where one household's /64 could flood a program. Refused requests no longer cost a database write.

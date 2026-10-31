@@ -22,4 +22,4 @@ If your version changes any of these, use a different name. You may still say it
 ## Organizations running a program
 The organization that runs a program (not the software maintainers) is responsible for its volunteers, corners, hours, and its relationship with schools and families. See `docs/FOR-ORGANIZATIONS.md`.
 
-Questions or permission requests: heriberto@savvysolutionpros.com. This policy is not legal advice; it records the maintainers' conditions for using the project's name.
+Questions or permission requests: intake@savvysolutionpros.com. This policy is not legal advice; it records the maintainers' conditions for using the project's name.
