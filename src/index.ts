@@ -17,6 +17,8 @@ export interface Env {
   HMAC_KEY: string;
   TURNSTILE_SECRET?: string;
   TURNSTILE_SITEKEY?: string;
+  WALK_DAILY_CAP?: string;     // per program, per NY day (default 100)
+  APPLY_DAILY_CAP?: string;    // per program, per NY day (default 50)
   APP_NAME: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
@@ -25,7 +27,7 @@ export interface Env {
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.1.5";
+const VERSION = "1.1.6";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)
@@ -177,10 +179,10 @@ async function openAny(env: Env, aad: string, sealed: string): Promise<string> {
 }
 
 // ------------------------------------------------------------------ lookups
-interface Org { id: number; slug: string; name: string; public_phone: string | null; borough: string | null; }
+interface Org { id: number; slug: string; name: string; public_phone: string | null; borough: string | null; demo: number; }
 async function orgBySlug(env: Env, slug: string): Promise<Org> {
   if (!/^[a-z0-9-]{3,40}$/.test(slug)) throw new HttpError(404, "no_org");
-  const o = await retry(() => env.DB.prepare("SELECT id, slug, name, public_phone, borough FROM orgs WHERE slug=? AND active=1")
+  const o = await retry(() => env.DB.prepare("SELECT id, slug, name, public_phone, borough, demo FROM orgs WHERE slug=? AND active=1")
     .bind(slug).first<Org>());
   if (!o) throw new HttpError(404, "no_org");
   return o;
@@ -190,6 +192,36 @@ async function corner(env: Env, orgId: number, id: number) {
     .first<{ id: number; label: string }>();
   if (!c) bad("bad_corner");
   return c;
+}
+
+// ------------------------------------------------------------------ readiness and ceilings
+// A program takes walk requests only when someone can act on them: at least one coordinator to call the family back
+// and at least two approved adults to walk (Rule of Two). A demo program shows the forms but never stores anything.
+const MIN_APPROVED_ADULTS = 2;
+const caps = (env: Env) => ({
+  walk: Math.max(1, Number(env.WALK_DAILY_CAP) || 100),
+  apply: Math.max(1, Number(env.APPLY_DAILY_CAP) || 50),
+});
+interface Readiness { coordinators: number; approved_adults: number; accepting_walks: boolean; min_approved_adults: number; }
+async function readiness(env: Env, org: Org): Promise<Readiness> {
+  const r = await retry(() => env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM coordinators WHERE org_id=?1) AS c,
+            (SELECT COUNT(*) FROM volunteers WHERE org_id=?1 AND status='approved') AS v`).bind(org.id).first<{ c: number; v: number }>());
+  const c = r?.c ?? 0, v = r?.v ?? 0;
+  return { coordinators: c, approved_adults: v, min_approved_adults: MIN_APPROVED_ADULTS,
+    accepting_walks: org.demo === 1 || (c >= 1 && v >= MIN_APPROVED_ADULTS) };
+}
+/** Epoch seconds of the most recent midnight in New York (DST-correct). */
+function nyMidnight(nowSec: number): number {
+  const p = nyParts(nowSec);
+  return nyToEpoch(`${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`, "00:00");
+}
+async function todayCounts(env: Env, orgId: number): Promise<{ walks: number; applications: number }> {
+  const since = nyMidnight(Math.floor(Date.now() / 1000));
+  const r = await env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM walk_requests WHERE org_id=?1 AND created_at>=?2) AS w,
+            (SELECT COUNT(*) FROM volunteers WHERE org_id=?1 AND created_at>=?2) AS a`).bind(orgId, since).first<{ w: number; a: number }>();
+  return { walks: r?.w ?? 0, applications: r?.a ?? 0 };
 }
 
 // ------------------------------------------------------------------ public handlers
@@ -212,8 +244,9 @@ async function publicOrg(env: Env, slug: string): Promise<Response> {
       "SELECT id, label, cross_streets, lat, lon FROM corners WHERE org_id=? AND active=1 ORDER BY label").bind(o.id).all())).results;
     const windows = (await retry(() => env.DB.prepare(
       "SELECT corner_id, dow, start_min, end_min FROM windows WHERE org_id=? ORDER BY dow, start_min").bind(o.id).all())).results;
-    const body = { org: { slug: o.slug, name: o.name, public_phone: o.public_phone, borough: o.borough },
-      corners, windows, turnstile_sitekey: env.TURNSTILE_SITEKEY || null, retention_hours: Number(env.RETENTION_HOURS) };
+    const ready = await readiness(env, o);
+    const body = { org: { slug: o.slug, name: o.name, public_phone: o.public_phone, borough: o.borough, demo: o.demo === 1 },
+      accepting_walks: ready.accepting_walks, corners, windows, turnstile_sitekey: env.TURNSTILE_SITEKEY || null, retention_hours: Number(env.RETENTION_HOURS) };
     try {
       await caches.default.put(key, new Response(JSON.stringify(body), { headers: {
         "content-type": "application/json", "cache-control": `public, max-age=${STALE_S}`, "x-fetched-at": String(Math.floor(Date.now() / 1000)) } }));
@@ -239,16 +272,22 @@ async function volunteerApply(req: Request, env: Env, slug: string): Promise<Res
   if (b.briefing_ack !== true) bad("briefing_ack_required");
   const prefs = Array.isArray(b.corners) ? b.corners.slice(0, 10).map((x) => int(x, "bad_corner")) : [];
   for (const id of prefs) await corner(env, o.id, id);
+  const next = "A coordinator will contact you to meet in person before you are approved.";
+  if (o.demo === 1) return json({ ok: true, demo: true, next }, 202);   // demo: validated, never stored
+  const cap = caps(env).apply, since = nyMidnight(Math.floor(Date.now() / 1000));
+  if ((await todayCounts(env, o.id)).applications >= cap) throw new HttpError(429, "program_daily_limit");
   const phHash = await hmac(env.HMAC_KEY, "phone|" + ph);
   const aad = (f: string) => `volunteers|${f}|${o.id}`;
   const res = await env.DB.prepare(
+    // The ceiling is re-checked inside the INSERT itself, so concurrent requests cannot overshoot it.
     `INSERT INTO volunteers (org_id, name_enc, phone_enc, phone_hmac, corners_pref, briefing_ack)
-     VALUES (?,?,?,?,?,1) ON CONFLICT(org_id, phone_hmac) DO NOTHING`)
+     SELECT ?1,?2,?3,?4,?5,1 WHERE (SELECT COUNT(*) FROM volunteers WHERE org_id=?1 AND created_at>=?6) < ?7
+     ON CONFLICT(org_id, phone_hmac) DO NOTHING`)
     .bind(o.id, await seal(env.DATA_KEY, aad("name"), name), await seal(env.DATA_KEY, aad("phone"), ph), phHash,
-      JSON.stringify(prefs)).run();
+      JSON.stringify(prefs), since, cap).run();
   // Same response whether new or duplicate: the endpoint does not reveal who has already applied.
   if (res.meta.changes) await audit(env, o.id, "public", "volunteer_applied", "vol");
-  return json({ ok: true, next: "A coordinator will contact you to meet in person before you are approved." }, 202);
+  return json({ ok: true, next }, 202);
 }
 
 async function walkRequest(req: Request, env: Env, slug: string): Promise<Response> {
@@ -256,6 +295,8 @@ async function walkRequest(req: Request, env: Env, slug: string): Promise<Respon
   await limit(env, "walk-ip", clientIp(req), 5, 3600);
   const b = await body<Record<string, unknown>>(req, ["corner_id", "date", "time", "callback", "lang", "consent", "turnstile"]);
   await turnstile(env, b.turnstile, req);
+  const ready = await readiness(env, o);
+  if (!ready.accepting_walks) throw new HttpError(409, "program_not_ready");
   if (b.consent !== true) bad("consent_required");
   const c = await corner(env, o.id, int(b.corner_id, "bad_corner"));
   const slot = nyToEpoch(str(b.date, 10, 10, "bad_time"), str(b.time, 5, 5, "bad_time"));
@@ -273,13 +314,25 @@ async function walkRequest(req: Request, env: Env, slug: string): Promise<Respon
   const lang = typeof b.lang === "string" && (LANGS as readonly string[]).includes(b.lang) ? b.lang : "en";
   const id = randomString(26, ID_ALPHABET), ref = randomString(6, REF_ALPHABET);
   const expires = slot + Number(env.RETENTION_HOURS || 72) * 3600;
-  await env.DB.prepare(
+  const next = "A coordinator will call you to confirm two adults. For danger now, call 911.";
+  if (o.demo === 1) return json({ ok: true, demo: true, ref, meeting_point: c.label, slot_start: slot, deletes_at: expires, next }, 201);
+  const cap = caps(env).walk, since = nyMidnight(Math.floor(Date.now() / 1000));
+  // Ceiling and readiness are re-checked inside the INSERT, so neither a burst nor a suspension racing this request
+  // can slip a row past them.
+  const ins = await env.DB.prepare(
     `INSERT INTO walk_requests (id, ref, org_id, corner_id, slot_start, callback_enc, callback_hmac, lang, expires_at)
-     VALUES (?,?,?,?,?,?,?,?,?)`)
-    .bind(id, ref, o.id, c.id, slot, await seal(env.DATA_KEY, `walk|callback|${o.id}|${id}`, cb), cbHash, lang, expires).run();
+     SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9
+     WHERE (SELECT COUNT(*) FROM walk_requests WHERE org_id=?3 AND created_at>=?10) < ?11
+       AND (SELECT COUNT(*) FROM volunteers WHERE org_id=?3 AND status='approved') >= ?12
+       AND EXISTS (SELECT 1 FROM coordinators WHERE org_id=?3)`)
+    .bind(id, ref, o.id, c.id, slot, await seal(env.DATA_KEY, `walk|callback|${o.id}|${id}`, cb), cbHash, lang, expires,
+      since, cap, MIN_APPROVED_ADULTS).run();
+  if (!ins.meta.changes) {
+    const now2 = await readiness(env, o);
+    throw now2.accepting_walks ? new HttpError(429, "program_daily_limit") : new HttpError(409, "program_not_ready");
+  }
   await audit(env, o.id, "public", "walk_requested", id);
-  return json({ ok: true, ref, meeting_point: c.label, slot_start: slot, deletes_at: expires,
-    next: "A coordinator will call you to confirm two adults. For danger now, call 911." }, 201);
+  return json({ ok: true, ref, meeting_point: c.label, slot_start: slot, deletes_at: expires, next }, 201);
 }
 
 // ------------------------------------------------------------------ volunteer handlers (capability token)
@@ -367,15 +420,29 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     const vrows = (await env.DB.prepare(
       "SELECT id, name_enc, phone_enc, status, corners_pref, created_at FROM volunteers WHERE org_id=? AND status<>'suspended' ORDER BY status, created_at")
       .bind(org.id).all<{ id: number; name_enc: string; phone_enc: string; status: string; corners_pref: string; created_at: number }>()).results;
+    // One unreadable record (corruption, or a key it was not sealed under) must never take the whole dashboard down:
+    // it is shown as unreadable, logged without personal data, and counted for the readiness probe.
     const volunteers = [];
+    let unreadable = 0;
     for (const v of vrows) {
-      const ph = await openAny(env, `volunteers|phone|${org.id}`, v.phone_enc);
-      volunteers.push({ id: v.id, name: await openAny(env, `volunteers|name|${org.id}`, v.name_enc),
-        phone_masked: "•••-•••-" + ph.slice(-4), status: v.status, corners_pref: JSON.parse(v.corners_pref), created_at: v.created_at });
+      let name: string | null = null, masked: string | null = null;
+      try {
+        name = await openAny(env, `volunteers|name|${org.id}`, v.name_enc);
+        masked = "•••-•••-" + (await openAny(env, `volunteers|phone|${org.id}`, v.phone_enc)).slice(-4);
+      } catch (e) {
+        unreadable++; name = null; masked = null;
+        log("error", "decrypt_failed", { table: "volunteers", id: v.id, err: (e as Error).name });
+      }
+      let pref: unknown = [];
+      try { pref = JSON.parse(v.corners_pref); } catch { /* malformed preference list: show none */ }
+      volunteers.push({ id: v.id, name, phone_masked: masked, unreadable: name === null, status: v.status, corners_pref: pref, created_at: v.created_at });
     }
     const onShift = (await env.DB.prepare(
       "SELECT volunteer_id, corner_id, checkin_at FROM shifts WHERE org_id=? AND checkout_at IS NULL").bind(org.id).all()).results;
-    return json({ org: { slug: org.slug, name: org.name }, you: { email: actor, role }, corners, walks, volunteers, on_shift: onShift,
+    const ready = await readiness(env, org), today = await todayCounts(env, org.id), cap = caps(env);
+    return json({ org: { slug: org.slug, name: org.name, demo: org.demo === 1 }, you: { email: actor, role }, corners, walks, volunteers, on_shift: onShift,
+      readiness: ready, unreadable_records: unreadable, today: { ...today, walk_cap: cap.walk, apply_cap: cap.apply,
+        walks_near_cap: today.walks >= Math.ceil(cap.walk * 0.8), applications_near_cap: today.applications >= Math.ceil(cap.apply * 0.8) },
       rule_of_two: "a corner counts as covered only with >= 2 adults; a walk is assigned only to 2 distinct approved adults" });
   }
 
@@ -392,6 +459,7 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
       await env.DB.prepare("UPDATE volunteers SET status='approved', token_hash=?, approved_by=?, approved_at=? WHERE id=?")
         .bind(await sha256("cap|" + tok), actor, now, vid).run();
       await audit(env, org.id, actor, v.status === "approved" ? "volunteer_token_rotated" : "volunteer_approved", `vol:${vid}`);
+      await invalidateOrg(org.slug);   // readiness may have changed
       // The token travels in the URL fragment: browsers never send fragments to servers, so it never appears in logs.
       return json({ ok: true, checkin_link: `${new URL(req.url).origin}/v.html#t=${tok}`,
         note: "Shown once. Give it to the volunteer in person or by Signal. Approving again rotates it." });
@@ -402,6 +470,7 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
         env.DB.prepare("UPDATE shifts SET checkout_at=? WHERE volunteer_id=? AND checkout_at IS NULL").bind(now, vid),
       ]);
       await audit(env, org.id, actor, "volunteer_suspended", `vol:${vid}`);
+      await invalidateOrg(org.slug);   // readiness may have changed
       return json({ ok: true });
     }
     await revealGuard(env, org.id, actor);
@@ -482,6 +551,7 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     await env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,?) ON CONFLICT DO UPDATE SET role=excluded.role")
       .bind(email, org.id, r).run();
     await audit(env, org.id, actor, "coordinator_set", `${r}`);
+    await invalidateOrg(org.slug);
     return json({ ok: true });
   }
   if (res === "audit" && rid === "verify") return json(await auditVerify(env));
@@ -579,6 +649,16 @@ async function health(env: Env): Promise<Response> {
     for (const r of rows) checks[r.k] = { ...JSON.parse(r.v), age_s: now - r.at };
   } catch { /* reported below */ }
   checks.db = dbOk;
+  if (dbOk) {
+    try {
+      const p = await env.DB.prepare(
+        `SELECT COUNT(*) AS total, SUM(demo) AS demo,
+                SUM(CASE WHEN demo=0 AND EXISTS (SELECT 1 FROM coordinators c WHERE c.org_id=o.id)
+                          AND (SELECT COUNT(*) FROM volunteers v WHERE v.org_id=o.id AND v.status='approved') >= ?1 THEN 1 ELSE 0 END) AS accepting
+         FROM orgs o WHERE active=1`).bind(MIN_APPROVED_ADULTS).first<{ total: number; demo: number; accepting: number }>();
+      checks.programs = { total: p?.total ?? 0, demo: p?.demo ?? 0, accepting_walks: p?.accepting ?? 0 };
+    } catch { /* informational only */ }
+  }
   const pg = checks.purge as { ok?: boolean; age_s?: number } | undefined;
   const audit = checks.audit_verify as { ok?: boolean; result?: { ok?: boolean } } | undefined;
   const problems: string[] = [];
@@ -598,7 +678,7 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
     return await health(env);
   }
   if (req.method === "GET" && p[1] === "orgs" && p.length === 2) {
-    const { results } = await retry(() => env.DB.prepare("SELECT slug, name, borough FROM orgs WHERE active=1 ORDER BY name").all());
+    const { results } = await retry(() => env.DB.prepare("SELECT slug, name, borough, demo = 1 AS demo FROM orgs WHERE active=1 ORDER BY name").all());
     return json({ orgs: results });
   }
   if (p[1] === "o" && p[2]) {

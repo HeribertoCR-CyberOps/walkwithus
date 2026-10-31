@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.6 — 2026-10-31
+**Anti-spam and readiness: nothing is accepted unless a real, connected program stands behind it.**
+- **Readiness gate.** A program takes walk requests only when it has at least one coordinator to call families back **and** at least two approved adults (Rule of Two). Until then the API answers `409 program_not_ready` and the family page replaces the form with "This program isn't taking walk requests yet. In danger, call 911.", plus the organization's phone. Volunteer applications stay open. The public page updates the moment a volunteer is approved or suspended or a coordinator is added (edge cache invalidated). Readiness is re-checked inside the `INSERT`, so a suspension racing a request cannot slip a row through.
+- **Per-program daily ceilings.** `WALK_DAILY_CAP` (default 100) and `APPLY_DAILY_CAP` (default 50) per New York day, counted from real stored rows and enforced atomically in the `INSERT`. A concurrent burst at the ceiling stores nothing extra (tested with 8 parallel requests). Past the ceiling, families see "call the organization directly" and 911. Coordinators see today's counts and a warning at 80%.
+- **Demo programs never store anything.** New `orgs.demo` flag (migration 0003 sets it for the `demo` program). Forms validate exactly as in a real program, but no row and no audit entry is written; the page says "Demo: nothing was saved and no one will call."
+- **Self-healing dashboard.** One undecryptable volunteer record (corruption, or a key it was not sealed under) used to fail the whole coordinator dashboard. It is now shown as an unreadable record, excluded from walk assignment, logged without personal data, and counted (`unreadable_records`).
+- **Coordinator "Program status" panel:** taking requests or not, exactly what is missing, and today's counts against the ceilings.
+- **Readiness probe:** `checks.programs { total, demo, accepting_walks }` (no personal data).
+- Strings: `not_ready`, `demo_saved`, `program_not_ready`, `program_daily_limit` in all 11 languages (52 strings + 7 error messages in every language).
+- Tests: 3 new end-to-end tests (readiness gate, demo no-store, ceilings including concurrency) and 4 new browser checks (demo note, not-ready card, single-program redirect, coordinator status panel). 27/27 end-to-end tests pass.
+- Service worker cache `wwu-v7`.
+
 ## 1.1.5 — 2026-10-31
 - **Honest home page:** `/` no longer jumps into the demo when the demo is the only program. It shows what Walk With Us is, says plainly that no program runs in the area yet (with 911), links to the demo labelled as made-up corners, and gives organizations a contact to start one. When exactly one real program exists, `/` still opens it directly; with several, it lists them. The demo is never treated as a real program. New strings in all 11 languages (non-English drafts pending native review).
 - **Fix (visible since 1.1.3):** the emergency buttons read "Call911", "tip:1-800-577-TIPS" and "line:988". Each button is a flex container, which drops the space at the edge of each text piece; the label is now one inline span. A browser test now checks every button in every language for the space before its number (Chinese correctly keeps its full-width colon). Verified: all 22 language/theme checks fail on the buggy version and pass on the fix.

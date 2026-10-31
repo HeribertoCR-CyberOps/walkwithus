@@ -23,7 +23,7 @@ writeFileSync(".dev.vars", [`DATA_KEY=${randomBytes(32).toString("base64")}`, `H
 execFileSync("npx", ["wrangler", "d1", "migrations", "apply", "walkwithus", "--local", "--persist-to", P], { stdio: "ignore" });
 const win = [0, 1, 2, 3, 4, 5, 6].flatMap((d) => [`(1,1,${d},450,525)`, `(1,1,${d},870,945)`, `(1,2,${d},0,1440)`]).join(",");
 execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--persist-to", P, "--command",
-  `INSERT INTO orgs (id,slug,name,borough,public_phone) VALUES (1,'demo','Demo Program','Bronx','(718) 555-0100');
+  `INSERT INTO orgs (id,slug,name,borough,public_phone,demo) VALUES (1,'demo','Demo Program','Bronx','(718) 555-0100',1);
    INSERT INTO corners (id,org_id,label,cross_streets,lat,lon) VALUES (1,1,'Corner A','Example Ave & 1st St',40.84,-73.89),(2,1,'Corner B','Example Ave & 2nd St',40.841,-73.891);
    INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${win};
    INSERT INTO coordinators (email,org_id,role) VALUES ('lead@demo.test',1,'admin'), ('coord@demo.test',1,'coordinator');`], { stdio: "ignore" });
@@ -77,9 +77,14 @@ for (const [code, m] of Object.entries(META)) for (const scheme of ["light", "da
 }
 await check("volunteer page", { ready: "h1" }, B + "/v.html", async (pg, text) => { assert.ok(/coordinator/i.test(text)); assert.ok(await pg.$('a[href="tel:911"]')); });
 for (const who of ["lead@demo.test", "coord@demo.test"]) {
-  await check(`coordinator ${who}`, { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok(who) } }, ready: "text=Corners right now" },
+  await check(`coordinator ${who}`, { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok(who) } }, ready: "text=Program status" },
     B + "/c.html?o=demo", async (pg, text) => { assert.equal(/Admin/.test(text), who.startsWith("lead"), "admin section only for admins"); });
 }
+// Demo program: the walk form submits, shows the "nothing was saved" note, and stores nothing.
+await check("demo walk request shows 'nothing saved'", { ctx: {}, ready: "#wh" }, B + "/?o=demo", async (pg) => {
+  await pg.fill("#w-cb", "(718) 555-0123"); await pg.check("#w-consent"); await pg.click("form button[type=submit]");
+  await pg.waitForSelector("form .result.ok .demo-note", { timeout: 10000 });
+});
 // Home page: with only the demo program, "/" must stay on an honest landing page (no redirect into the demo).
 for (const [code, dir] of [["en", "ltr"], ["es", "ltr"], ["ar", "rtl"]]) {
   await check(`home landing ${code}`, { lang: code, ctx: {}, ready: "#hh" }, B + "/", async (pg, text) => {
@@ -91,6 +96,21 @@ for (const [code, dir] of [["en", "ltr"], ["es", "ltr"], ["ar", "rtl"]]) {
     assert.ok(await pg.isVisible('#content [role="status"]'), "no-program-yet notice");
   });
 }
+// Now add a real program that has no approved adults yet (inserted while the server runs, after the home-page checks).
+execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--persist-to", P, "--command",
+  `INSERT INTO orgs (id,slug,name,borough) VALUES (2,'notready','Not Ready Program','Queens');
+   INSERT INTO corners (id,org_id,label,cross_streets,lat,lon) VALUES (3,2,'Corner N','Example Rd & 3rd St',40.75,-73.85);
+   INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${[0, 1, 2, 3, 4, 5, 6].map((d) => `(2,3,${d},0,1440)`).join(",")};`], { stdio: "ignore" });
+// A real program without two approved adults: the walk form is replaced by an honest notice; the volunteer form stays.
+await check("not-ready program hides the walk form", { ctx: {}, ready: "#wh" }, B + "/?o=notready", async (pg) => {
+  assert.equal(await pg.$("#w-cb"), null, "walk form must not render");
+  assert.ok(await pg.isVisible('section [role="status"]'));
+  assert.ok(await pg.$("#v-name"), "volunteer form still available");
+});
+// With exactly one real program, "/" opens it directly (the demo never counts as a program).
+await check("home opens the single real program", { ctx: {}, ready: "#v-name" }, B + "/", async (pg) => {
+  assert.equal(new URL(pg.url()).search, "?o=notready");
+});
 // A crafted ?o= value must never turn into an API request outside /api/o/<valid-slug> or /api/c/<valid-slug>.
 for (const [label, url] of [["family page rejects crafted org slug", "/?o=..%2F..%2Fhealth"], ["coordinator page rejects crafted org slug", "/c.html?o=demo%2Fvolunteers%2F1%2Fsuspend"]]) {
   const ctx = await browser.newContext({ extraHTTPHeaders: { "cf-access-jwt-assertion": tok("lead@demo.test") } });
@@ -98,7 +118,7 @@ for (const [label, url] of [["family page rejects crafted org slug", "/?o=..%2F.
   pg.on("request", (r) => { const u = new URL(r.url()); if (u.pathname.startsWith("/api/")) hits.push(u.pathname); });
   try {
     await pg.goto(B + url); await pg.waitForLoadState("networkidle");
-    const bad = hits.filter((h) => !/^\/api\/(orgs|o\/demo|c\/me|c\/demo\/dashboard)$/.test(h));
+    const bad = hits.filter((h) => !/^\/api\/(orgs|o\/(demo|notready)|c\/me|c\/demo\/dashboard)$/.test(h));
     assert.ok(hits.length > 0, "page made no API calls");
     assert.deepEqual(bad, [], "unexpected API paths: " + bad.join(", "));
     console.log("ok  ", label);
