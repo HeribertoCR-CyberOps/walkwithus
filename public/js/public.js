@@ -17,7 +17,11 @@ function dowOf(dateStr) {
 
 // Unicode first-strong isolates keep phone numbers, times and codes left-to-right inside Arabic/Urdu text.
 const iso = (s) => "\u2068" + s + "\u2069";
-const isoNums = (s) => s.replace(/[0-9][0-9A-Z:–\-]*[0-9A-Z]/g, (m) => "\u2066" + m + "\u2069");
+const NUM = /[0-9][0-9A-Z:–\-]*[0-9A-Z]/g;
+// Same isolation, but each number becomes a no-wrap span so "1-800-577-TIPS" never breaks across lines.
+const numNodes = (s) => { const out = []; let i = 0;
+  for (const m of s.matchAll(NUM)) { out.push(s.slice(i, m.index), el("span", { class: "nowrap", text: "\u2066" + m[0] + "\u2069" })); i = m.index + m[0].length; }
+  out.push(s.slice(i)); return out.filter((x) => x !== ""); };
 const fmtList = (items) => { try { return new Intl.ListFormat(L, { style: "narrow", type: "unit" }).format(items); } catch { return items.join(", "); } };
 
 function chrome() {
@@ -34,9 +38,9 @@ function chrome() {
   const off = document.getElementById("offline");
   if (off) { off.textContent = T().offline; off.hidden = navigator.onLine; }
   document.getElementById("tagline").textContent = T().tagline;
-  document.getElementById("sos911").textContent = isoNums(T().danger);
-  document.getElementById("sostips").textContent = isoNums(T().tips);
-  document.getElementById("soscrisis").textContent = isoNums(T().crisis);
+  document.getElementById("sos911").replaceChildren(...numNodes(T().danger));
+  document.getElementById("sostips").replaceChildren(...numNodes(T().tips));
+  document.getElementById("soscrisis").replaceChildren(...numNodes(T().crisis));
 }
 
 function result(box, ok, ...nodes) {
@@ -68,19 +72,25 @@ function walkCard() {
   const cornerSel = el("select", { id: "w-corner", required: true }, ...state.corners.map((c) => el("option", { value: c.id, text: c.label })));
   const date = el("input", { type: "date", id: "w-date", min: today(), max: today(14), value: today(), required: true });
   const time = el("select", { id: "w-time", required: true });
-  const fillTimes = () => {
-    const cid = Number(cornerSel.value), dow = dowOf(date.value);
-    const opts = [];
-    // today: offer only slots that haven't passed yet (NY time)
+  // Open 15-minute slots for a corner on a date; today only offers slots that have not passed yet (NY time).
+  const slotsFor = (cid, dateStr) => {
     const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
       .formatToParts(new Date()).map((x) => [x.type, x.value]));
-    const nowMin = date.value === today() ? +p.hour * 60 + +p.minute : -1;
+    const nowMin = dateStr === today() ? +p.hour * 60 + +p.minute : -1, dow = dowOf(dateStr), opts = [];
     for (const w of state.windows.filter((x) => x.corner_id === cid && x.dow === dow))
       for (let m = w.start_min; m < w.end_min; m += 15) if (m >= nowMin) opts.push(hhmm(m));
-    time.replaceChildren(...(opts.length ? opts.map((t) => el("option", { value: t, text: t }))
-      : [el("option", { value: "", text: "—" })]));
+    return opts;
   };
-  cornerSel.addEventListener("change", fillTimes); date.addEventListener("change", fillTimes); fillTimes();
+  // If the chosen day has nothing left (e.g. after school hours), move to the next day that does, within the 14-day window.
+  const nextOpenDate = (cid) => { for (let d = 0; d <= 14; d++) if (slotsFor(cid, today(d)).length) return today(d); return null; };
+  const fillTimes = (advance) => {
+    const cid = Number(cornerSel.value);
+    if (advance && !slotsFor(cid, date.value).length) { const n = nextOpenDate(cid); if (n) date.value = n; }
+    const opts = slotsFor(cid, date.value);
+    time.replaceChildren(...(opts.length ? opts.map((t) => el("option", { value: t, text: t }))
+      : [el("option", { value: "", text: T().no_times })]));
+  };
+  cornerSel.addEventListener("change", () => fillTimes(true)); date.addEventListener("change", () => fillTimes(false)); fillTimes(true);
   const cb = el("input", { type: "tel", id: "w-cb", autocomplete: "tel", inputmode: "tel", required: true });
   const lg = el("select", { id: "w-lang" }, ...CALL_LANGS.map(([v, n]) => el("option", { value: v, text: n })));
   lg.value = CALL_LANGS.some(([v]) => v === L) ? L : "en";
@@ -103,7 +113,7 @@ function walkCard() {
       const del = new Date(r.deletes_at * 1000).toLocaleString(L, { timeZone: "America/New_York" });
       result(box, true, el("p", { text: T().sent }), el("p", { class: "ref", dir: "ltr", text: r.ref }), el("p", { text: r.meeting_point }),
         el("p", { class: "muted", text: `${T().deletes} ${del}` }), el("p", { text: T().next }));
-      form.reset(); date.value = today(); fillTimes();
+      form.reset(); date.value = today(); fillTimes(true);
     } catch (err) {
       // Server or network failure (not a validation error): give the family a human fallback right away.
       const down = !err.status || err.status >= 500 || err.status === 429;
