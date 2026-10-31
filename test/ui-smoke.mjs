@@ -179,7 +179,10 @@ await (async () => {
   await ctx.close();
 })();
 // Offline: after one visit, the shell, the 911 link and the last schedule still render with no network.
-await (async () => {
+// Runs on Chromium only: Playwright's offline emulation with an active service worker fails inside its own WebKit build
+// ("internal error") and times out in Firefox, so on those engines it would test the harness, not the app.
+if (ENGINE !== "chromium") console.log("skip offline after first visit (offline emulation with service workers is Chromium-only in Playwright)");
+else await (async () => {
   const label = "offline after first visit";
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const pg = await ctx.newPage();

@@ -108,7 +108,7 @@ A separate reviewer audited v1.1.6 from the code alone, with proof-of-concept ex
 - **The template keeps `workers_dev: true` for quick start.** Production configs disable it (the reference deployment does); DEPLOY explains why.
 
 ### Accessibility (v1.1.7)
-- **axe-core 4.10.3**, WCAG 2.0/2.1/2.2 A and AA plus best practice: 0 violations on the home, family, volunteer and privacy pages, in light and dark, English and Arabic (RTL), at 320 CSS px, in Chromium, WebKit and Firefox. This now runs in CI.
+- **axe-core 4.10.3**, WCAG 2.0/2.1/2.2 A and AA plus best practice: 0 violations on the home, family, volunteer and privacy pages, in light and dark, English and Arabic (RTL). Production was scanned in Chromium, WebKit and Firefox (48 runs). CI scans at 320 CSS px on every change in Chromium (required) and WebKit.
 - **Manual checks:**
   - Reflow at 320 px (one failure found and fixed: an unbreakable email address widened the page).
   - 200% text size.

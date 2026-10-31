@@ -21,7 +21,7 @@
 - **Accessibility:**
   - axe-core (WCAG 2.2 AA + best practice) and 320 px reflow checks run in CI on 4 pages × light/dark × English/Arabic.
   - Fixed a reflow failure on the home page at 320 px.
-  - The browser suite runs on Chromium, WebKit (Safari, every iOS browser) and Firefox (`ENGINE=`).
+  - The browser suite runs on Chromium (required check) and WebKit (Safari, every iOS browser; new CI job). Firefox passed every accessibility scan against production; its local test run is not yet stable against the dev server (timeouts while loading), so it is not claimed in CI.
 - **Ownership and licensing:**
   - New `NOTICE` (copyright Savvy Solution Pros LLC; code AGPL-3.0-only, free forever; docs CC BY 4.0).
   - New `TRADEMARK.md`: the name "Walk With Us" may be used only by programs that keep every safety guarantee.
