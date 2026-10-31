@@ -1,16 +1,23 @@
 name: test
-on: [push, pull_request]
-permissions:
-  contents: read
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  workflow_dispatch:
+permissions: {}
+concurrency: { group: test-${{ github.ref }}, cancel-in-progress: true }
 jobs:
   test:
+    name: e2e (Workers runtime + D1)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - run: npm ci
+      - run: npm audit signatures
       - run: npm run typecheck
       - name: Runtime dependency audit (the Worker ships zero runtime dependencies)
         run: npm audit --omit=dev --audit-level=low
@@ -18,16 +25,22 @@ jobs:
         env: { CI: "1", WRANGLER_SEND_METRICS: "false" }
       - name: SBOM (CycloneDX)
         run: npm sbom --sbom-format cyclonedx > sbom.cdx.json
-      - uses: actions/upload-artifact@v4
-        with: { name: sbom, path: sbom.cdx.json }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: sbom, path: sbom.cdx.json, retention-days: 90 }
   ui:
+    name: browser (11 languages, RTL, offline)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions: { contents: read }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm install --no-save playwright@1.56.1 && npx playwright@1.56.1 install --with-deps chromium
       - run: npm run test:ui
         env: { CI: "1", WRANGLER_SEND_METRICS: "false" }
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: ui-failures, path: ".wrangler/ui-fail-*.png", retention-days: 14 }

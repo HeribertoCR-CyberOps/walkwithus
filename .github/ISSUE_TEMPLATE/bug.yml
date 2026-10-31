@@ -1,0 +1,32 @@
+name: Bug report
+description: Something is broken or behaves differently from the documentation.
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste a real phone number, name, address or reference code from a live program.** Use made-up data.
+        Security problems go to the private advisory form, not here.
+  - type: textarea
+    id: what
+    attributes: { label: What happened, description: "And what you expected instead." }
+    validations: { required: true }
+  - type: textarea
+    id: steps
+    attributes: { label: Steps to reproduce, placeholder: "1. Open /?o=demo\n2. Select Arabic\n3. ..." }
+    validations: { required: true }
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Family page, Volunteer page, Coordinator dashboard, Offline / install, API, Deployment / operations, Documentation]
+    validations: { required: true }
+  - type: input
+    id: lang
+    attributes: { label: Language selected, placeholder: "en, es, zh, ru, bn, ht, ko, ar, ur, fr, pl" }
+  - type: input
+    id: device
+    attributes: { label: Device and browser, placeholder: "iPhone 15, Safari 26" }
+  - type: input
+    id: version
+    attributes: { label: Version, description: "From /api/health/ready → version", placeholder: "1.1.1" }

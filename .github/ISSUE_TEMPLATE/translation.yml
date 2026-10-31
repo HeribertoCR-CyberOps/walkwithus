@@ -1,0 +1,33 @@
+name: Translation correction
+description: A sentence is wrong, unclear, too formal, or not how people speak.
+labels: [translation, i18n]
+body:
+  - type: markdown
+    attributes:
+      value: Thank you. Native-speaker corrections are the most valuable contribution to this project. Safety lines (911, tip line, crisis line) are fixed first.
+  - type: dropdown
+    id: lang
+    attributes:
+      label: Language
+      options: [Español, 中文, Русский, বাংলা, Kreyòl ayisyen, 한국어, العربية, اردو, Français, Polski, Other]
+    validations: { required: true }
+  - type: textarea
+    id: current
+    attributes: { label: What it says now, description: "Copy the text or attach a screenshot." }
+    validations: { required: true }
+  - type: textarea
+    id: better
+    attributes: { label: How it should say it }
+    validations: { required: true }
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Problem
+      options: [Wrong meaning, Unclear, Too formal / cold, Offensive, Grammar or spelling, Layout (text cut off, overlapping, backwards numbers)]
+    validations: { required: true }
+  - type: checkboxes
+    id: native
+    attributes:
+      label: Reviewer
+      options:
+        - label: I am a native or fluent speaker of this language.

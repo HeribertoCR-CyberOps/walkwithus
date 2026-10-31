@@ -1,0 +1,7 @@
+# Every change needs a maintainer's eyes; security-sensitive paths are listed explicitly.
+*                       @HeribertoCR-CyberOps
+/src/crypto.ts          @HeribertoCR-CyberOps
+/src/access.ts          @HeribertoCR-CyberOps
+/migrations/            @HeribertoCR-CyberOps
+/public/_headers        @HeribertoCR-CyberOps
+/.github/               @HeribertoCR-CyberOps

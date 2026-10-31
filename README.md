@@ -1,5 +1,12 @@
 # Walk With Us
 
+[![test](https://github.com/HeribertoCR-CyberOps/walkwithus/actions/workflows/test.yml/badge.svg)](https://github.com/HeribertoCR-CyberOps/walkwithus/actions/workflows/test.yml)
+[![codeql](https://github.com/HeribertoCR-CyberOps/walkwithus/actions/workflows/codeql.yml/badge.svg)](https://github.com/HeribertoCR-CyberOps/walkwithus/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/HeribertoCR-CyberOps/walkwithus/badge)](https://scorecard.dev/viewer/?uri=github.com/HeribertoCR-CyberOps/walkwithus)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-0f6b4f)](LICENSE)
+
+> **Live demo (made-up data):** <https://walk.savvysolutionpros.com/?o=demo> · Not an emergency service: in danger, call **911**.
+
 **Free, privacy-first safe-passage coordination for community organizations.**
 Trained adult volunteers on public corners at school times — the model that cut violent crime 14% along Chicago's Safe Passage routes (McMillen, Sarmiento-Barbieri & Singh, *Journal of Urban Economics*, 2019).
 
@@ -18,6 +25,19 @@ See [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the design and its mathematical
 ## For organizations
 
 You run the program; the software is free. Read [`docs/FOR-ORGANIZATIONS.md`](docs/FOR-ORGANIZATIONS.md) for what you provide, what the maintainers support, and how to start.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `src/` | The Worker: routing, Access JWT verification, AES-256-GCM field encryption, maintenance |
+| `migrations/` | D1 schema; Rule of Two and the append-only audit log are enforced here |
+| `public/` | Static app (no framework, no third-party code): family, volunteer, coordinator pages, service worker, 11 languages |
+| `test/` | End-to-end tests against the real Workers runtime + browser checks |
+| `scripts/monitor.mjs` | External availability probe (also run by the `monitor` workflow) |
+| `docs/` | Blueprint, audit, SLO, deployment, organization guide, volunteer briefing, translations |
+| `wrangler.jsonc` | Template config for your own deployment |
+| `wrangler.ssp.jsonc` | The reference deployment operated by Savvy Solution Pros |
 
 ## Deploy (≈30 minutes, $0)
 

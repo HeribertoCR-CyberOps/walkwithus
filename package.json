@@ -12,11 +12,25 @@
     "db:migrate:remote": "wrangler d1 migrations apply walkwithus --remote",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/e2e.test.mjs",
-    "test:ui": "node test/ui-smoke.mjs"
+    "test:ui": "node test/ui-smoke.mjs",
+    "deploy:ssp": "wrangler deploy -c wrangler.ssp.jsonc",
+    "db:migrate:ssp": "wrangler d1 migrations apply walkwithus --remote -c wrangler.ssp.jsonc",
+    "monitor": "node scripts/monitor.mjs"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20261013.1",
+    "@cloudflare/workers-types": "5.20261031.1",
     "typescript": "5.9.3",
-    "wrangler": "4.150.0"
+    "wrangler": "4.156.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeribertoCR-CyberOps/walkwithus.git"
+  },
+  "homepage": "https://walk.savvysolutionpros.com",
+  "bugs": {
+    "url": "https://github.com/HeribertoCR-CyberOps/walkwithus/issues"
   }
 }

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Someone is in danger right now
+    url: https://www.nyc.gov/site/911/index.page
+    about: This repository is not an emergency service. Call 911.
+  - name: Report a security vulnerability (private)
+    url: https://github.com/HeribertoCR-CyberOps/walkwithus/security/advisories/new
+    about: Never open a public issue for a vulnerability or anything that exposes personal data.

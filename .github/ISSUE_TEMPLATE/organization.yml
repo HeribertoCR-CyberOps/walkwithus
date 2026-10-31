@@ -1,0 +1,27 @@
+name: My organization wants to run a program
+description: Community organizations, schools' parent groups, faith and tenant groups.
+labels: [organization]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post personal phone numbers or emails here; this page is public. Give the organization's public website and we will contact you through it.
+        Read docs/FOR-ORGANIZATIONS.md first for what you provide and what we support.
+  - type: input
+    id: org
+    attributes: { label: Organization name and public website }
+    validations: { required: true }
+  - type: input
+    id: area
+    attributes: { label: Neighborhood / borough }
+    validations: { required: true }
+  - type: textarea
+    id: plan
+    attributes: { label: What you have in mind, description: "Schools, corners, how many volunteers you expect." }
+  - type: checkboxes
+    id: ack
+    attributes:
+      label: Understood
+      options:
+        - label: Our organization runs the program (volunteers, corners, coordination). The software and support are free.
+          required: true

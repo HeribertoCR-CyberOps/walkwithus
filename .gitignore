@@ -2,3 +2,10 @@ node_modules/
 .wrangler/
 .dev.vars
 *.log
+
+# Local secrets / caches
+.env
+.env.*
+*.pem
+sbom.cdx.json
+.DS_Store
