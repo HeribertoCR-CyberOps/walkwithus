@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.5 — 2026-10-31
+- **Honest home page:** `/` no longer jumps into the demo when the demo is the only program. It shows what Walk With Us is, says plainly that no program runs in the area yet (with 911), links to the demo labelled as made-up corners, and gives organizations a contact to start one. When exactly one real program exists, `/` still opens it directly; with several, it lists them. The demo is never treated as a real program. New strings in all 11 languages (non-English drafts pending native review).
+- **Fix (visible since 1.1.3):** the emergency buttons read "Call911", "tip:1-800-577-TIPS" and "line:988". Each button is a flex container, which drops the space at the edge of each text piece; the label is now one inline span. A browser test now checks every button in every language for the space before its number (Chinese correctly keeps its full-width colon). Verified: all 22 language/theme checks fail on the buggy version and pass on the fix.
+- Service worker cache `wwu-v6`.
+
 ## 1.1.4 — 2026-10-31
 - **Security fix (client-side request forgery, CodeQL alert #7):** the coordinator page built API paths from the raw `?o=` query value. A crafted link such as `c.html?o=demo/volunteers/1/suspend` made later clicks reach unintended endpoints with the coordinator's session; for example, **Add corner** would have suspended volunteer 1. Both the coordinator and family pages now accept only slugs matching the server's own rule (`^[a-z0-9-]{3,40}$`) and encode every path segment. Regression tests prove the old code made the forged request and the new code does not. No evidence of exploitation: the instance is a demo with test accounts, and every coordinator action is in the audit log.
 - Test harness: the browser test opens its server log once and shares the descriptor (CodeQL alert #6, file-system race).

@@ -64,6 +64,12 @@ for (const [code, m] of Object.entries(META)) for (const scheme of ["light", "da
     assert.ok(await pg.$('a[href="tel:911"]'), "911 link");
     assert.ok(await pg.$('a[href="tel:18005778477"]'), "tips link");
     assert.ok(/1-800-577-TIPS/.test(text), "tips number in logical order");
+    // Each emergency button must read as one phrase with its spaces intact ("Call 911", not "Call911").
+    for (const id of ["sos911", "sostips", "soscrisis"]) {
+      const t = await pg.$eval("#" + id, (n) => n.innerText);
+      const before = (/(.)\u2066/.exec(t) || [])[1];  // character just before the isolated number
+      assert.ok(!/\n/.test(t) && before !== undefined && /[\s\uFF1A]/.test(before), `${id} lost the space before its number: ${JSON.stringify(t)}`);
+    }
     assert.equal((await pg.$$(".corner")).length, 2);
     assert.ok((await pg.$$("#w-lang option")).length >= 14, "call languages");
     if (!m.reviewed) assert.ok(await pg.isVisible("#draftnote"), "machine-translation notice shown");
@@ -73,6 +79,17 @@ await check("volunteer page", { ready: "h1" }, B + "/v.html", async (pg, text) =
 for (const who of ["lead@demo.test", "coord@demo.test"]) {
   await check(`coordinator ${who}`, { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok(who) } }, ready: "text=Corners right now" },
     B + "/c.html?o=demo", async (pg, text) => { assert.equal(/Admin/.test(text), who.startsWith("lead"), "admin section only for admins"); });
+}
+// Home page: with only the demo program, "/" must stay on an honest landing page (no redirect into the demo).
+for (const [code, dir] of [["en", "ltr"], ["es", "ltr"], ["ar", "rtl"]]) {
+  await check(`home landing ${code}`, { lang: code, ctx: {}, ready: "#hh" }, B + "/", async (pg, text) => {
+    assert.equal(new URL(pg.url()).search, "", "redirected away from /");
+    assert.equal(await pg.evaluate(() => document.documentElement.dir), dir);
+    assert.ok(await pg.$('a[href="?o=demo"]'), "demo link");
+    assert.ok(await pg.$('a[href^="mailto:"]'), "organizations contact");
+    assert.ok(await pg.$('a[href="tel:911"]'), "911 link");
+    assert.ok(await pg.isVisible('#content [role="status"]'), "no-program-yet notice");
+  });
 }
 // A crafted ?o= value must never turn into an API request outside /api/o/<valid-slug> or /api/c/<valid-slug>.
 for (const [label, url] of [["family page rejects crafted org slug", "/?o=..%2F..%2Fhealth"], ["coordinator page rejects crafted org slug", "/c.html?o=demo%2Fvolunteers%2F1%2Fsuspend"]]) {

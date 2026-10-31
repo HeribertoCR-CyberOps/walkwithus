@@ -65,6 +65,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; word-break
 .hidden { display: none !important; }
 main.wide { max-width: 1080px; }
 #content { display: grid; gap: 16px; }
+.stack { display: grid; gap: 16px; }
 [dir="rtl"] .check { flex-direction: row-reverse; text-align: right; }
 [dir="rtl"] ol, [dir="rtl"] ul { padding-right: 1.4em; padding-left: 0; }
 :lang(bn), :lang(ur), :lang(ar) { line-height: 1.75; }
