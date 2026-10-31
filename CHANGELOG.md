@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.4 — 2026-10-31
+- **Security fix (client-side request forgery, CodeQL alert #7):** the coordinator page built API paths from the raw `?o=` query value. A crafted link such as `c.html?o=demo/volunteers/1/suspend` made later clicks reach unintended endpoints with the coordinator's session; for example, **Add corner** would have suspended volunteer 1. Both the coordinator and family pages now accept only slugs matching the server's own rule (`^[a-z0-9-]{3,40}$`) and encode every path segment. Regression tests prove the old code made the forged request and the new code does not. No evidence of exploitation: the instance is a demo with test accounts, and every coordinator action is in the audit log.
+- Test harness: the browser test opens its server log once and shares the descriptor (CodeQL alert #6, file-system race).
+- Property tests moved to `test/property.test.ts` so OpenSSF Scorecard's fuzzing check detects fast-check.
+- Service worker cache `wwu-v5`.
+
 ## 1.1.3 — 2026-10-31
 - **Walk form after hours:** once the last slot of the day has passed, the form now moves to the next day with open times. Before, it showed an empty time list with no explanation. If a family picks a day with nothing left, the list says so in their language (new string `no_times`, all 11 languages; non-English drafts pending native review).
 - **Emergency buttons:** phone numbers no longer break across lines ("1-800-577-TIPS" stays whole), and button text is centered with padding.

@@ -2,7 +2,11 @@ import { el, api, hhmm } from "./i18n.js";
 
 const fmt = (s) => new Date(s * 1000).toLocaleString(undefined, { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const content = document.getElementById("content");
-let slug = new URLSearchParams(location.search).get("o");
+// Same rule as the server (src/index.ts publicOrg). A crafted ?o= value such as "../.." must never become part of an API path
+// (client-side request forgery with the coordinator's Access session), so anything else is treated as "no org selected".
+const SLUG = /^[a-z0-9-]{3,40}$/;
+const qSlug = new URLSearchParams(location.search).get("o");
+let slug = qSlug && SLUG.test(qSlug) ? qSlug : null;
 let D = null;
 
 function note(box, ok, ...n) { box.className = "result " + (ok ? "ok" : "err"); box.replaceChildren(...n); }
@@ -97,9 +101,9 @@ async function load() {
     if (!slug) {
       const me = await api("/api/c/me");
       document.getElementById("who").textContent = me.email;
-      if (me.orgs.length === 1) slug = me.orgs[0].slug;
+      if (me.orgs.length === 1 && SLUG.test(me.orgs[0].slug)) slug = me.orgs[0].slug;
       else { content.replaceChildren(el("section", { class: "card" }, el("h2", { text: "Your programs" }),
-        el("ul", { class: "plain" }, ...me.orgs.map((o) => el("li", {}, el("a", { href: `?o=${o.slug}`, text: `${o.name} (${o.role})` })))))); return; }
+        el("ul", { class: "plain" }, ...me.orgs.map((o) => el("li", {}, el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: `${o.name} (${o.role})` })))))); return; }
     }
     D = await api(`/api/c/${slug}/dashboard`);
     document.getElementById("who").textContent = `${D.you.email} · ${D.you.role} · ${D.org.name}`;
