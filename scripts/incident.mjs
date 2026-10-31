@@ -15,6 +15,10 @@ if (!base) { console.error("usage: incident.mjs <base-url> [org-slug]"); process
 const DRY = process.env.DRY_RUN === "1";
 const TITLE = "Production health check failing";
 const LABEL = "incident";
+// When Cloudflare itself refuses the monitor (Bot Fight Mode cannot be skipped on the Free plan), the app was never
+// reached: that is "inconclusive", not an outage. It is tracked in its own issue and the run stays green with a warning.
+const BLOCKED_TITLE = "Monitor blocked by Cloudflare (inconclusive)";
+const BLOCKED_LABEL = "monitor-blocked";
 
 const probe = () => {
   try { return JSON.parse(execFileSync("node", ["scripts/monitor.mjs", base, ...(slug ? [slug] : [])], { encoding: "utf8" })); }
@@ -47,9 +51,47 @@ if (!run.ok) {
   run = { ...again, ok: again.ok, confirmed: run.results.filter((r) => !r.pass && failedTwice.has(r.name)) };
 }
 
-const open = JSON.parse(gh(["issue", "list", "--label", LABEL, "--state", "open", "--json", "number,title", "--limit", "5"]) || "[]")
-  .find((i) => i.title === TITLE);
+const findOpen = (label, title) => JSON.parse(gh(["issue", "list", "--label", label, "--state", "open", "--json", "number,title", "--limit", "5"]) || "[]")
+  .find((i) => i.title === title);
+const open = findOpen(LABEL, TITLE);
+const blocked = findOpen(BLOCKED_LABEL, BLOCKED_TITLE);
 const stamp = new Date().toISOString();
+const edgeOnly = !run.ok && run.confirmed?.length > 0 && run.confirmed.every((r) => /^cloudflare_/.test(r.detail || ""));
+
+if (edgeOnly) {
+  const what = run.confirmed.map((r) => `${r.name} (${r.detail.split(" ")[0]}, ray ${/ray=(\S+)/.exec(r.detail)?.[1] || "?"})`).join("; ");
+  console.log(`::warning title=Monitor blocked by Cloudflare::Cloudflare refused the monitor before it reached the app: ${what}. Not counted as an outage; check from a phone if unsure.`);
+  const note = `At ${stamp} Cloudflare refused the monitor before it reached the app (confirmed by a retry): ${what}.\n\n` +
+    `This is **inconclusive, not an outage**: the probe never reached Walk With Us, so it can neither confirm nor rule out a problem. ` +
+    `Families who get the same check see a translated "reload the page" message with 911 (v1.1.8).\n\n` +
+    `Cause seen so far: zone Bot Fight Mode challenging GitHub's data-center addresses (Free plan: no rule can exempt it). ` +
+    `Options: run the monitor from an address Cloudflare does not challenge, or turn Bot Fight Mode off. ` +
+    `If you need certainty now, open ${base}/api/health from a phone. This issue closes itself when the monitor gets through.`;
+  if (!blocked) {
+    try { gh(["label", "create", BLOCKED_LABEL, "--color", "BF8700", "--description", "The edge refused the monitor; app state unknown"]); } catch { /* exists */ }
+    gh(["issue", "create", "--title", BLOCKED_TITLE, "--label", BLOCKED_LABEL, "--body", note]);
+    console.log("opened monitor-blocked");
+  } else {
+    // At most one comment a day while the block persists.
+    const comments = JSON.parse(gh(["issue", "view", String(blocked.number), "--json", "comments"]) || "{}").comments || [];
+    const last = comments[comments.length - 1];
+    if (!last || Date.now() - Date.parse(last.createdAt) >= 86400_000) gh(["issue", "comment", String(blocked.number), "--body", note]);
+    console.log(`monitor still blocked (#${blocked.number})`);
+  }
+  if (open) {
+    gh(["issue", "comment", String(open.number), "--body", `Reclassified at ${stamp}: the only failing probes are Cloudflare refusing the monitor, not the app failing. Tracked as "${BLOCKED_TITLE}". Closing this incident.`]);
+    gh(["issue", "close", String(open.number), "--reason", "not planned"]);
+    console.log(`reclassified #${open.number}`);
+  }
+  process.exit(0);
+}
+
+if (blocked && (run.ok || !run.confirmed?.length || run.confirmed.some((r) => !/^cloudflare_/.test(r.detail || "")))) {
+  // The monitor got through to the app again (healthy or not), so the block is over.
+  gh(["issue", "comment", String(blocked.number), "--body", `At ${stamp} the monitor reached the app again. Closing.`]);
+  gh(["issue", "close", String(blocked.number), "--reason", "completed"]);
+  console.log(`unblocked #${blocked.number}`);
+}
 
 if (run.ok || !run.confirmed?.length) {
   if (open) {
