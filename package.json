@@ -1,8 +1,8 @@
 {
   "name": "walkwithus",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
-  "description": "Walk With Us \u2014 free, privacy-first safe-passage coordination for community organizations. Coordinates adults; never tracks children.",
+  "description": "Walk With Us — free, privacy-first safe-passage coordination for community organizations. Coordinates adults; never tracks children.",
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {

@@ -66,3 +66,13 @@ See `docs/SLO.md`. Verified: readiness probe, edge caching and invalidation, mai
 | R6 | Coordinator device compromise | Access policy should require MFA and session ≤ 12 h; reveal ceiling bounds damage |
 | R7 | `DATA_KEY` custody | Store in a password manager / vault; rotation procedure in `DEPLOY.md` |
 | R8 | Turnstile not embedded by default | Decide at launch; embedding requires widening CSP to Cloudflare's challenge origin |
+
+---
+
+## Addendum — v1.1.1 (first live deploy, 2026-10-30)
+
+| ID | Finding | Severity | Fix | Verified |
+|---|---|---|---|---|
+| L-1 | Edge injected `static.cloudflareinsights.com` beacon and an inline bot-detection script into HTML. CSP blocked both (no data left the page), but the page attempted a third-party load. | Medium (privacy promise) | `Cache-Control: no-transform` on all pages via `_headers` | Live: 0 injected scripts on `/`, `/?o=demo`, `/privacy`, `/v`; 7-language live browser run with zero console errors |
+| L-2 | `/v` and `/c` (canonical URLs after the asset redirect) did not inherit `no-store` set for `/v.html`, `/c.html` | Low | Rules added for both forms | Live header check |
+| L-3 | `workers.dev` and preview URLs served a second copy of the app | Low (coordinator API still required a valid Access JWT) | Disabled in `wrangler.jsonc` | `workers.dev` returns 404 |
