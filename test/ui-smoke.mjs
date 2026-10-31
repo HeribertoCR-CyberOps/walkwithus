@@ -1,19 +1,24 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Browser smoke test: renders the family page in every language (light + dark, phone viewport) and the volunteer and
 // coordinator pages, against the real Worker. Fails on any JS error, any literal "null"/"undefined" in the page, a
 // missing 911 link, a wrong text direction, or reversed phone numbers in RTL languages.
 // Run: npm run test:ui   (Playwright is a pinned devDependency; first time: `npx playwright install --with-deps chromium`)
 import { spawn, execFileSync } from "node:child_process";
 import { randomBytes, generateKeyPairSync, sign } from "node:crypto";
-import { writeFileSync, openSync, rmSync, mkdirSync } from "node:fs";
+import { writeFileSync, openSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 
 process.env.CI = "1"; process.env.WRANGLER_SEND_METRICS = "false";
 const require = createRequire(import.meta.url);
-let chromium;
-try { ({ chromium } = require("playwright")); }
-catch { ({ chromium } = createRequire("/opt/node22/lib/node_modules/")("playwright")); }
-
+// ENGINE selects the browser engine: chromium (default), webkit (Safari / every iOS browser) or firefox.
+const ENGINE = process.env.ENGINE || "chromium";
+let pw;
+try { pw = require("playwright"); }
+catch { pw = createRequire("/opt/node22/lib/node_modules/")("playwright"); }
+const chromium = pw[ENGINE];
+if (!chromium) throw new Error("unknown ENGINE " + ENGINE);
 const P = ".wrangler/ui-smoke", PORT = 8803, B = `http://127.0.0.1:${PORT}`;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = publicKey.export({ format: "jwk" });
@@ -96,6 +101,28 @@ for (const [code, dir] of [["en", "ltr"], ["es", "ltr"], ["ar", "rtl"]]) {
     assert.ok(await pg.isVisible('#content [role="status"]'), "no-program-yet notice");
   });
 }
+// Accessibility (WCAG 2.2 AA + best practice) with axe-core, and reflow at 320 CSS px (WCAG 1.4.10), light and dark, LTR and RTL.
+{
+  const AXE = readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
+  for (const [page, path, ready] of [["home", "/", "#hh"], ["family", "/?o=demo", "#wh"], ["volunteer", "/v.html", "h1"], ["privacy", "/privacy", "h1"]])
+    for (const scheme of ["light", "dark"]) for (const lang of ["en", "ar"]) {
+      const label = `a11y ${page} ${lang} ${scheme}`;
+      // bypassCSP only lets the test inject axe; the page itself runs under its real CSP.
+      const ctx = await browser.newContext({ viewport: { width: 320, height: 700 }, colorScheme: scheme, bypassCSP: true });
+      await ctx.addInitScript((x) => { try { localStorage.setItem("wwu.lang", x); } catch {} }, lang);
+      const pg = await ctx.newPage();
+      try {
+        await pg.goto(B + path); await pg.waitForSelector(ready, { timeout: 15000 });
+        assert.ok(await pg.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "horizontal scroll at 320 px");
+        await pg.addScriptTag({ content: AXE });
+        const v = await pg.evaluate(async () => (await axe.run(document, { runOnly: { type: "tag",
+          values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"] } })).violations.map((x) => `${x.id}(${x.nodes.length})`));
+        assert.deepEqual(v, [], "axe violations");
+        console.log("ok  ", label);
+      } catch (e) { failures.push(label); console.log("FAIL", label, "—", e.message.split("\n")[0]); }
+      await ctx.close();
+    }
+}
 // Now add a real program that has no approved adults yet (inserted while the server runs, after the home-page checks).
 execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--persist-to", P, "--command",
   `INSERT INTO orgs (id,slug,name,borough) VALUES (2,'notready','Not Ready Program','Queens');
@@ -162,5 +189,5 @@ await (async () => {
 })();
 await browser.close();
 stop();
-console.log(failures.length ? `\n${failures.length} FAILED` : "\nALL UI CHECKS PASSED");
+console.log(failures.length ? `\n${failures.length} FAILED (${ENGINE})` : `\nALL UI CHECKS PASSED (${ENGINE})`);
 process.exit(failures.length ? 1 : 0);

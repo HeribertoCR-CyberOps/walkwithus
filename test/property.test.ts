@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Property-based tests (fast-check) for the cryptographic core. Each property runs on hundreds of generated inputs,
 // including empty strings, astral-plane Unicode, RTL text and long values, and shrinks any failure to a minimal case.
 // Run: npm run test:property   (Node 22.18+ runs this .ts file and src/crypto.ts natively by stripping types)

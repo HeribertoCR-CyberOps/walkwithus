@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Caches the app shell only. API responses are never cached (they're per-request and may be sensitive).
 const V = "wwu-v7";
 const SHELL = ["/", "/app.css", "/js/i18n.js", "/js/public.js", "/js/strings.js", "/icon.svg", "/manifest.webmanifest", "/privacy"];

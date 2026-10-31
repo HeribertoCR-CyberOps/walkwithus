@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // End-to-end tests against the real Workers runtime (wrangler dev --local) and a real local D1.
 // Coordinator identity uses genuine RS256 JWTs signed by a test key; production code has no bypass.
 import { test, before, after } from "node:test";
@@ -58,6 +60,18 @@ function sqlFails(command) {
   if (r.ok) return false;
   if (/CHECK constraint failed|UNIQUE constraint failed|append-only|NOT NULL constraint failed|FOREIGN KEY/.test(r.msg)) return true;
   throw new Error("statement failed for a non-constraint reason: " + r.msg.slice(0, 400));
+}
+// Same format as src/crypto.ts seal(): "v1." + base64(iv || ciphertext+tag), AES-256-GCM with AAD.
+const enc = new TextEncoder();
+const aesKey = (b64) => crypto.subtle.importKey("raw", Buffer.from(b64, "base64"), "AES-GCM", false, ["encrypt", "decrypt"]);
+async function sealNode(keyB64, aad, pt) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: enc.encode(aad) }, await aesKey(keyB64), enc.encode(pt)));
+  return "v1." + Buffer.concat([iv, ct]).toString("base64");
+}
+async function openNode(keyB64, aad, sealed) {
+  const raw = Buffer.from(sealed.slice(3), "base64");
+  return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.subarray(0, 12), additionalData: enc.encode(aad) }, await aesKey(keyB64), raw.subarray(12)));
 }
 const nyDate = (plusDays) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(Date.now() + plusDays * 86400000));
 
@@ -170,10 +184,10 @@ test("readiness gate: no walk requests until a coordinator AND two approved adul
   assert.equal((await ap("Seed One", "917-555-0181")).status, 202);
   assert.equal((await ap("Seed Two", "917-555-0182")).status, 202);
   [seed1, seed2] = sql("SELECT id FROM volunteers WHERE org_id=1 ORDER BY id").map((x) => x.id);
-  await req(`/api/c/crotona-test/volunteers/${seed1}/approve`, { method: "POST", token: COORD(), body: {} });
+  await req(`/api/c/crotona-test/volunteers/${seed1}/approve`, { method: "POST", token: ADMIN(), body: {} });
   pub = await req("/api/o/crotona-test");
   assert.equal(pub.j.accepting_walks, false, "one adult is not enough (Rule of Two)");
-  await req(`/api/c/crotona-test/volunteers/${seed2}/approve`, { method: "POST", token: COORD(), body: {} });
+  await req(`/api/c/crotona-test/volunteers/${seed2}/approve`, { method: "POST", token: ADMIN(), body: {} });
   pub = await req("/api/o/crotona-test");
   assert.equal(pub.j.accepting_walks, true);
   const d = await req("/api/c/crotona-test/dashboard", { token: COORD() });
@@ -287,6 +301,19 @@ test("rate limits: 6th request/hour from one IP → 429; 4th/day for one callbac
   assert.equal(sql("SELECT COUNT(*) n FROM rate WHERE k LIKE '%198.51%'")[0].n, 0, "raw IPs never stored");
 });
 
+test("rate limits group an IPv6 /64 as one network, and refused requests cost no database write", async () => {
+  const net = "2001:db8:abcd:12";
+  const codes = [];
+  for (let i = 0; i < 7; i++) codes.push((await req("/api/o/crotona-test/walk", { method: "POST", ip: `${net}::${(i + 1).toString(16)}:${i}`,
+    body: { corner_id: 1, date: nyDate(3), time: "09:00", callback: `718-555-02${10 + i}`, consent: true } })).status);
+  assert.deepEqual(codes, [201, 201, 201, 201, 201, 429, 429], "addresses in one /64 share the 5/hour limit");
+  assert.equal((await req("/api/o/crotona-test/walk", { method: "POST", ip: "2001:db8:abcd:13::1",
+    body: { corner_id: 1, date: nyDate(3), time: "09:15", callback: "718-555-0230", consent: true } })).status, 201, "a different /64 is a different network");
+  const before = sql("SELECT MAX(n) m FROM rate")[0].m;
+  for (let i = 0; i < 5; i++) await req("/api/o/crotona-test/walk", { method: "POST", ip: `${net}::99`, body: {} });
+  assert.equal(sql("SELECT MAX(n) m FROM rate")[0].m, before, "refusals past the limit do not write");
+});
+
 test("CSRF/abuse: wrong content-type → 415, cross-origin → 403, oversized → 413", async () => {
   let r = await fetch(BASE + "/api/o/crotona-test/walk", { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" });
   assert.equal(r.status, 415);
@@ -338,15 +365,17 @@ test("dashboard decrypts names for coordinators but masks phones; callback never
 });
 
 test("approve → one-time capability link; token stored only as hash; rotation invalidates old link", async () => {
-  const a = await req(`/api/c/crotona-test/volunteers/${v1}/approve`, { method: "POST", token: COORD(), body: {} });
+  const denied = await req(`/api/c/crotona-test/volunteers/${v1}/approve`, { method: "POST", token: COORD(), body: {} });
+  assert.deepEqual([denied.status, denied.j.error], [403, "admin_only"], "a plain coordinator cannot enrol adults");
+  const a = await req(`/api/c/crotona-test/volunteers/${v1}/approve`, { method: "POST", token: ADMIN(), body: {} });
   assert.equal(a.status, 200);
   const t = /#t=([A-Za-z0-9_-]{43})$/.exec(a.j.checkin_link)[1];
   assert.ok(!sql(`SELECT token_hash FROM volunteers WHERE id=${v1}`)[0].token_hash.includes(t));
-  const b = await req(`/api/c/crotona-test/volunteers/${v1}/approve`, { method: "POST", token: COORD(), body: {} });
+  const b = await req(`/api/c/crotona-test/volunteers/${v1}/approve`, { method: "POST", token: ADMIN(), body: {} });
   tok1 = /#t=([A-Za-z0-9_-]{43})$/.exec(b.j.checkin_link)[1];
   assert.equal((await req("/api/v/me", { method: "POST", body: { token: t } })).status, 401, "old token dead");
   assert.equal((await req("/api/v/me", { method: "POST", body: { token: tok1 } })).status, 200);
-  await req(`/api/c/crotona-test/volunteers/${v2}/approve`, { method: "POST", token: COORD(), body: {} });
+  await req(`/api/c/crotona-test/volunteers/${v2}/approve`, { method: "POST", token: ADMIN(), body: {} });
 });
 
 test("volunteer check-in/out: one open shift, corner must belong to org, bad token 401", async () => {
@@ -380,7 +409,13 @@ test("callback reveal is logged; suspend kills the link and closes the shift", a
   assert.equal(r.j.callback, "+17185550199");
   assert.ok(sql("SELECT COUNT(*) n FROM audit WHERE action='walk_callback_revealed' AND actor='coord@org.test'")[0].n >= 1);
   await req("/api/v/checkin", { method: "POST", body: { token: tok1, corner_id: 1 } });
-  assert.equal((await req(`/api/c/crotona-test/volunteers/${v1}/suspend`, { method: "POST", token: COORD(), body: {} })).status, 200);
+  assert.equal(sql(`SELECT status FROM walk_requests WHERE id='${walkId}'`)[0].status, "assigned");
+  const susp = await req(`/api/c/crotona-test/volunteers/${v1}/suspend`, { method: "POST", token: COORD(), body: {} });
+  assert.equal(susp.status, 200);
+  assert.equal(susp.j.walks_reopened, 1);
+  const wr = sql(`SELECT status, v1, v2 FROM walk_requests WHERE id='${walkId}'`)[0];
+  assert.deepEqual(wr, { status: "open", v1: null, v2: null }, "a suspended adult is removed from upcoming walks");
+  assert.equal(sql("SELECT COUNT(*) n FROM audit WHERE action='volunteer_suspended' AND subject LIKE '%walks_reopened:1'")[0].n, 1);
   assert.equal((await req("/api/v/me", { method: "POST", body: { token: tok1 } })).status, 401);
   assert.equal(sql(`SELECT COUNT(*) n FROM shifts WHERE volunteer_id=${v1} AND checkout_at IS NULL`)[0].n, 0);
 });
@@ -391,6 +426,35 @@ test("admin-only actions refused for a coordinator; allowed for admin", async ()
   assert.equal((await req("/api/c/crotona-test/corners", { method: "POST", token: ADMIN(), body: { ...body, lat: 51.5 } })).j.error, "outside_nyc");
   assert.equal((await req("/api/c/crotona-test/corners", { method: "POST", token: ADMIN(), body })).status, 201);
   assert.equal((await req("/api/c/crotona-test/windows", { method: "POST", token: ADMIN(), body: { corner_id: 1, dow: 1, start: "07:10", end: "08:00" } })).j.error, "bad_hhmm_15");
+  // a corner of another org cannot be touched, and no false audit entry is written
+  const n0 = sql("SELECT COUNT(*) n FROM audit WHERE action='corner_deactivated'")[0].n;
+  assert.equal((await req("/api/c/crotona-test/corners/3/deactivate", { method: "POST", token: ADMIN(), body: {} })).j.error, "no_corner");
+  assert.equal(sql("SELECT COUNT(*) n FROM audit WHERE action='corner_deactivated'")[0].n, n0);
+  assert.equal(sql("SELECT active FROM corners WHERE id=3")[0].active, 1);
+});
+
+test("coordinator management: no self-change, last admin protected, removal, audit names the target", async () => {
+  const C = (body, path = "") => req(`/api/c/crotona-test/coordinators${path}`, { method: "POST", token: ADMIN(), body });
+  assert.equal((await C({ email: "admin@org.test", role: "coordinator" })).j.error, "cannot_change_own_access");
+  assert.equal((await C({ email: "admin@org.test" }, "/remove")).j.error, "cannot_change_own_access");
+  assert.equal((await C({ email: "new@org.test", role: "coordinator" })).status, 200);
+  assert.equal((await C({ email: "new@org.test", role: "admin" })).status, 200);
+  const subj = sql("SELECT subject FROM audit WHERE action='coordinator_set' ORDER BY seq DESC LIMIT 1")[0].subject;
+  assert.match(subj, /^coord:[0-9a-f]{16}\|coordinator->admin$/, "target (keyed hash, no email) and transition recorded");
+  assert.equal((await C({ email: "new@org.test" }, "/remove")).status, 200);
+  assert.equal((await C({ email: "nobody@org.test" }, "/remove")).j.error, "no_coordinator");
+  assert.equal(sql("SELECT COUNT(*) n FROM coordinators WHERE email='new@org.test'")[0].n, 0);
+  // other-org: a plain coordinator cannot manage coordinators; the last admin can never be removed or demoted
+  const as = (email) => jwt({ email });
+  const OC = (who, body, path = "") => req(`/api/c/other-org/coordinators${path}`, { method: "POST", token: as(who), body });
+  assert.equal((await OC("other@org.test", { email: "second@org.test", role: "coordinator" })).status, 200);
+  assert.equal((await OC("second@org.test", { email: "other@org.test" }, "/remove")).j.error, "admin_only");
+  // promote second, let second remove other (allowed: second remains admin), then second is the last admin
+  assert.equal((await OC("other@org.test", { email: "second@org.test", role: "admin" })).status, 200);
+  assert.equal((await OC("second@org.test", { email: "other@org.test" }, "/remove")).status, 200);
+  assert.equal((await OC("second@org.test", { email: "plain@org.test", role: "coordinator" })).status, 200);
+  assert.equal((await OC("plain@org.test", { email: "second@org.test" }, "/remove")).j.error, "admin_only");
+  assert.equal(sql("SELECT COUNT(*) n FROM coordinators WHERE org_id=2 AND role='admin'")[0].n, 1, "exactly one admin left, and only another admin could remove it");
 });
 
 // ---------------------------------------------------------------- audit integrity
@@ -406,7 +470,10 @@ test("audit chain verifies; rows cannot be altered or deleted", async () => {
 
 // ---------------------------------------------------------------- retention
 test("cron purge: expired requests deleted, done walks and adult-minutes aggregated, identities gone", async () => {
-  sql(`UPDATE walk_requests SET status='done', expires_at = unixepoch() - 10 WHERE id='${walkId}'`);
+  // The walk was reopened when v1 was suspended: assign two other approved adults and finish it through the API.
+  assert.equal((await req(`/api/c/crotona-test/walks/${walkId}/assign`, { method: "POST", token: COORD(), body: { v1: seed1, v2: seed2 } })).status, 200);
+  assert.equal((await req(`/api/c/crotona-test/walks/${walkId}/close`, { method: "POST", token: COORD(), body: { status: "done" } })).status, 200);
+  sql(`UPDATE walk_requests SET expires_at = unixepoch() - 10 WHERE id='${walkId}'`);
   sql(`UPDATE walk_requests SET expires_at = unixepoch() - 10 WHERE status='open'`);
   sql(`UPDATE shifts SET checkin_at = unixepoch() - 400000, checkout_at = unixepoch() - 399000`);
   const before = sql("SELECT COUNT(*) n FROM walk_requests")[0].n;
@@ -438,7 +505,9 @@ test("readiness probe reports maintenance and audit status without personal data
   assert.equal(r.j.checks.db, true);
   assert.equal(r.j.checks.keys, true);
   assert.equal(r.j.checks.purge.ok, true, "cron purge ran in the previous test and recorded success");
-  assert.equal(r.j.checks.audit_verify.result.ok, true);
+  assert.equal(r.j.checks.audit_verify.ok, true);
+  assert.equal(r.j.checks.purge.result, undefined, "no activity counts in the public probe");
+  assert.equal(r.j.checks.rekey_state, undefined, "internal re-seal state is not published");
   // programs: crotona-test, other-org, no-coord, demo-test, cap-test. Accepting = crotona-test only: cap-test's seeded adults
   // were removed after the ceiling test, other-org has none, no-coord has no coordinator, and demo is never counted.
   assert.deepEqual(r.j.checks.programs, { total: 5, demo: 1, accepting_walks: 1 });
@@ -476,25 +545,47 @@ test("bulk-exfiltration ceiling: a coordinator can decrypt at most 30 numbers pe
   assert.equal((await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: COORD(), body: {} })).status, 200, "limit is per coordinator");
 });
 
-test("key rotation drill: old ciphertext readable under DATA_KEY_PREV, cron re-seals, then the old key can be removed", async () => {
+test("key rotation drill: cursor reaches every row (batch of 2), legacy-bound rows upgrade, then the old key can be removed", async () => {
   const ROT = () => jwt({ email: "rot@org.test" });
-  const vid = sql("SELECT id FROM volunteers WHERE org_id=1 ORDER BY id LIMIT 1 OFFSET 1")[0].id;
+  // A volunteer sealed the pre-1.1.7 way (AAD without the row binding) must still open, then be upgraded.
+  const legacyName = await sealNode(KEY1, "volunteers|name|1", "Legacy Person");
+  const legacyPhone = await sealNode(KEY1, "volunteers|phone|1", "+19175550177");
+  sql(`INSERT INTO volunteers (org_id, name_enc, phone_enc, phone_hmac, briefing_ack) VALUES (1, '${legacyName}', '${legacyPhone}', 'legacyhmac1', 1)`);
+  const legacyId = sql("SELECT id FROM volunteers WHERE phone_hmac='legacyhmac1'")[0].id;
+  const dash = await req("/api/c/crotona-test/dashboard", { token: ROT() });
+  assert.ok(dash.j.volunteers.some((v) => v.id === legacyId && v.name === "Legacy Person" && v.phone_masked.endsWith("0177")), "legacy binding still opens");
+
+  const vid = sql("SELECT id FROM volunteers WHERE org_id=1 AND phone_hmac<>'legacyhmac1' ORDER BY id LIMIT 1 OFFSET 1")[0].id;
   const before = (await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: ROT(), body: {} })).j.phone;
   assert.match(before, /^\+1\d{10}$/);
   const sealedBefore = sql(`SELECT phone_enc FROM volunteers WHERE id=${vid}`)[0].phone_enc;
 
-  await stopServer(); writeVars([`DATA_KEY=${KEY2}`, `DATA_KEY_PREV=${KEY1}`]); await startServer();
+  await stopServer(); writeVars([`DATA_KEY=${KEY2}`, `DATA_KEY_PREV=${KEY1}`, "REKEY_BATCH=2"]); await startServer();
   assert.equal((await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: ROT(), body: {} })).j.phone, before, "readable during rotation");
-  const ready = await req("/api/health/ready");
-  assert.equal(ready.j.checks.rotation_in_progress, true);
-  assert.equal((await fetch(BASE + "/__scheduled?cron=17+*+*+*+*", { headers: { connection: "close" } })).status, 200);
-  const rk = JSON.parse(sql("SELECT v FROM system_status WHERE k='rekey'")[0].v);
-  assert.equal(rk.ok, true); assert.ok(rk.result.resealed >= 1, JSON.stringify(rk)); assert.equal(rk.result.failed, 0);
+  assert.equal((await req("/api/health/ready")).j.checks.rotation_in_progress, true);
+  const rows = sql("SELECT (SELECT COUNT(*) FROM volunteers) + (SELECT COUNT(*) FROM walk_requests) n")[0].n;
+  let runs = 0, st;
+  do {
+    assert.equal((await fetch(BASE + "/__scheduled?cron=17+*+*+*+*", { headers: { connection: "close" } })).status, 200);
+    st = JSON.parse(sql("SELECT v FROM system_status WHERE k='rekey'")[0].v);
+    assert.equal(st.ok, true); assert.equal(st.result.failed, 0, JSON.stringify(st));
+    runs++;
+  } while (st.result.pending && runs < 200);
+  assert.equal(st.result.pending, false, "rotation completes");
+  assert.ok(runs >= Math.ceil(rows / 2), `the cursor walked the tables in batches of 2 (${runs} runs for ${rows} rows)`);
+  assert.equal((await req("/api/health/ready")).j.checks.rekey_pending, false);
   assert.notEqual(sql(`SELECT phone_enc FROM volunteers WHERE id=${vid}`)[0].phone_enc, sealedBefore, "row re-sealed under the new key");
+  // The legacy row now opens under the NEW key with the row-bound AAD, and no longer under the legacy binding.
+  const up = sql(`SELECT name_enc FROM volunteers WHERE id=${legacyId}`)[0].name_enc;
+  assert.equal(await openNode(KEY2, "volunteers|name|1|legacyhmac1", up), "Legacy Person");
+  await assert.rejects(openNode(KEY2, "volunteers|name|1", up));
 
   await stopServer(); writeVars([`DATA_KEY=${KEY2}`]); await startServer();
   assert.equal((await req(`/api/c/crotona-test/volunteers/${vid}/reveal`, { method: "POST", token: ROT(), body: {} })).j.phone, before, "readable with only the new key");
   const walkRow = sql("SELECT id FROM walk_requests LIMIT 1")[0];
   const w = await req(`/api/c/crotona-test/walks/${walkRow.id}/reveal`, { method: "POST", token: ROT(), body: {} });
   assert.match(w.j.callback, /^\+1\d{10}$/, "walk callbacks re-sealed too");
+  const d2 = await req("/api/c/crotona-test/dashboard", { token: ROT() });
+  assert.equal(d2.j.unreadable_records, 0, "nothing left unreadable after removing the old key");
 });
+

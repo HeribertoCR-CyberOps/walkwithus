@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // UI strings for the family-facing page.
 // EN is authoritative. Every other language is MACHINE-DRAFTED and must be reviewed by a native speaker before it is
 // marked reviewed:true. Until then the page shows a small notice in that language (see `draft`).

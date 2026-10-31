@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 import { META, CALL_LANGS, lang, setLang, tr, hhmm, el, api } from "./i18n.js";
 
 let L = lang();

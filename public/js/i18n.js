@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Shared helpers + language selection. Strings live in strings.js.
 import { STR, META, CALL_LANGS } from "./strings.js";
 export { STR, META, CALL_LANGS };

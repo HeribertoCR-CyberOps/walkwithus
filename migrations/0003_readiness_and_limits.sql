@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
+-- Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 -- 0003: program readiness, demo mode, and per-program daily ceilings.
 -- A demo program accepts form submissions for demonstration but never stores them.
 ALTER TABLE orgs ADD COLUMN demo INTEGER NOT NULL DEFAULT 0 CHECK (demo IN (0,1));

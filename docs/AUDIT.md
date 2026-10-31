@@ -76,3 +76,42 @@ See `docs/SLO.md`. Verified: readiness probe, edge caching and invalidation, mai
 | L-1 | Edge injected `static.cloudflareinsights.com` beacon and an inline bot-detection script into HTML. CSP blocked both (no data left the page), but the page attempted a third-party load. | Medium (privacy promise) | `Cache-Control: no-transform` on all pages via `_headers` | Live: 0 injected scripts on `/`, `/?o=demo`, `/privacy`, `/v`; 7-language live browser run with zero console errors |
 | L-2 | `/v` and `/c` (canonical URLs after the asset redirect) did not inherit `no-store` set for `/v.html`, `/c.html` | Low | Rules added for both forms | Live header check |
 | L-3 | `workers.dev` and preview URLs served a second copy of the app | Low (coordinator API still required a valid Access JWT) | Disabled in `wrangler.jsonc` | `workers.dev` returns 404 |
+
+---
+
+## Independent review — v1.1.7 (2026-10-31)
+
+A separate reviewer audited v1.1.6 from the code alone, with proof-of-concept exploits against an isolated copy. No critical issues were found. Every confirmed finding is fixed in 1.1.7 with a regression test.
+
+| # | Finding (severity) | Fix in 1.1.7 | Test |
+|---|---|---|---|
+| A1 | Rate limits keyed on the full IP; one IPv6 /64 sent 12 of 12 applications past the 5/hour limit and could exhaust a program's daily ceiling (High) | Limits keyed on the IPv4 address or the IPv6 /64; WAF rate-limit rule documented for the edge | 7 addresses in one /64 → 5 accepted, 2 refused; a different /64 accepted |
+| A2 | Refused requests still wrote the rate counter: about 1.2 req/s could burn the free-tier write quota (Medium) | Read first; past the limit a refusal costs no write | `MAX(n)` unchanged after 5 further refusals |
+| A3 | Key rotation re-sealed only the first 300 rows of each table forever; removing the old key would orphan the rest (Medium) | Persistent per-table cursor; done only after a clean full sweep; `rekey_pending` and `rekey_unreadable_rows` in the probe | Batch of 2 walks every row; old key removed; 0 unreadable |
+| A4 | Suspending a volunteer left them on walks already assigned (Rule of Two silently broken) (Medium) | Suspension reopens their upcoming walks in the same batch; audited with the count | Walk returns to `open` with no adults |
+| A5 | Audit could not show who an admin added or demoted; no removal endpoint (Medium) | Audit subject = keyed hash of the target + exact transition; removal endpoint; no self-change; last admin protected | Demotion, removal and last-admin cases |
+| A6 | Any plain coordinator could approve applicants and mint check-in links (Medium) | Approving and issuing links are admin-only | Coordinator → 403 `admin_only` |
+| A7 | Response timing revealed whether a phone had already applied (Low) | Same work (including the audit write) on both paths | Code review |
+| A8 | Volunteer ciphertexts were bound to field and org but not the row; the docs claimed row binding (Low) | AAD includes the row's per-org phone HMAC; old rows open via the legacy binding and are upgraded by maintenance | Legacy-sealed row opens, upgrades, then fails under the old binding |
+| A9 | Cross-org corner deactivation returned 200 and wrote a false audit entry (Low) | 404 `no_corner` unless the corner is this org's | No audit entry, corner unchanged |
+| A10 | Coordinator dashboard views were not audited (Low) | `dashboard_viewed` at most once per coordinator per 10 minutes | Code review |
+| A11 | Public readiness probe exposed activity counts (Suspected) | Public view shows pass/fail and age only | `purge.result` absent |
+| A12 | Workers invocation logs may store client IP next to each request (Suspected) | Invocation logs off; the app's own structured logs (no personal data) remain | Config |
+| A13 | Unknown Access key id locked coordinators out until the 1-hour cache expired (Suspected) | One forced refetch per minute on an unknown key id; signature still verified | Code review |
+| A14 | Body size limit checked after reading the whole body (Info) | `content-length` checked first | Existing 413 test |
+| A15 | Setting `TURNSTILE_SECRET` would break both forms because the pages don't send a token (Medium, misconfiguration) | Documented as not wired; the probe reports `turnstile_secret_set_but_ui_not_wired` | Code review |
+
+**Accepted with rationale:**
+- **Audit chain uses unkeyed SHA-256.** It detects tampering through the application; someone with direct database console access could rebuild it. Fix planned: an HMAC-keyed chain with the head hash exported off-platform daily.
+- **`auditVerify` reads the full table.** Acceptable at current size; incremental verification is planned.
+- **The edge cache is cleared per data center.** Other locations may show a stale `accepting_walks` for up to 60 s. The server re-checks readiness inside the `INSERT`, so a stale "open" form can never store a request for a program that isn't ready.
+- **The template keeps `workers_dev: true` for quick start.** Production configs disable it (the reference deployment does); DEPLOY explains why.
+
+### Accessibility (v1.1.7)
+- **axe-core 4.10.3**, WCAG 2.0/2.1/2.2 A and AA plus best practice: 0 violations on the home, family, volunteer and privacy pages, in light and dark, English and Arabic (RTL), at 320 CSS px, in Chromium, WebKit and Firefox. This now runs in CI.
+- **Manual checks:**
+  - Reflow at 320 px (one failure found and fixed: an unbreakable email address widened the page).
+  - 200% text size.
+  - Windows high-contrast (forced colors).
+  - Reduced motion.
+  - Keyboard: Tab reaches language, then 911, tip line and 988, with a visible focus ring.

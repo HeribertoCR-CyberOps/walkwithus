@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 import { el, api } from "./i18n.js";
 
 // The capability token arrives in the URL fragment (#t=...), which browsers never send to servers.

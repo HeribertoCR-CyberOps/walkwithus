@@ -14,7 +14,9 @@ html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--ink);
   font: 17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
   padding: env(safe-area-inset-top) max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(16px, env(safe-area-inset-left)); }
-main { max-width: 720px; margin: 0 auto; padding-block: 12px 48px; display: grid; gap: 16px; }
+main { max-width: 720px; margin: 0 auto; padding-block: 12px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+/* WCAG 1.4.10 reflow: long unbreakable strings (email addresses, URLs) must wrap at 320 CSS px instead of widening the page. */
+a { overflow-wrap: anywhere; }
 h1 { font-size: 1.5rem; margin: 0; line-height: 1.2; text-wrap: balance; }
 h2 { font-size: 1.15rem; margin: 0 0 8px; text-wrap: balance; }
 p { margin: 0 0 8px; }
@@ -65,8 +67,8 @@ th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line
 code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; word-break: break-all; }
 .hidden { display: none !important; }
 main.wide { max-width: 1080px; }
-#content { display: grid; gap: 16px; }
-.stack { display: grid; gap: 16px; }
+#content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 [dir="rtl"] .check { flex-direction: row-reverse; text-align: right; }
 [dir="rtl"] ol, [dir="rtl"] ul { padding-right: 1.4em; padding-left: 0; }
 :lang(bn), :lang(ur), :lang(ar) { line-height: 1.75; }
