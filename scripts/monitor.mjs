@@ -16,6 +16,8 @@ const probes = [
   ["liveness", "/api/health", (r, b) => r.status === 200 && b.ok === true],
   ["readiness", "/api/health/ready", (r, b) => r.status === 200 && b.ok === true],
   ["app_shell", "/", (r, b, t) => r.status === 200 && /Danger now\? Call 911/.test(t) && /default-src 'none'/.test(r.headers.get("content-security-policy") || "")],
+  // privacy promise: nothing injected by the edge (analytics beacon, bot JS) and no-transform still set
+  ["no_injection", "/", (r, b, t) => !/<script(?![^>]*src="\/js\/)/i.test(t) && /no-transform/.test(r.headers.get("cache-control") || "")],
   ["emergency_page", "/404-check-" + Date.now(), (r, b, t) => /tel:911/.test(t)],
 ];
 if (slug) probes.push(["schedule", `/api/o/${slug}`, (r, b) => r.status === 200 && Array.isArray(b.corners)]);

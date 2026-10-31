@@ -7,7 +7,17 @@
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Resource-Policy: same-origin
   Strict-Transport-Security: max-age=63072000; includeSubDomains
+  # no-transform: stops the edge injecting analytics/bot scripts into our HTML (privacy promise: no third-party requests)
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
 /c.html
-  Cache-Control: no-store
+  ! Cache-Control
+  Cache-Control: no-store, no-transform
+/c
+  ! Cache-Control
+  Cache-Control: no-store, no-transform
 /v.html
-  Cache-Control: no-store
+  ! Cache-Control
+  Cache-Control: no-store, no-transform
+/v
+  ! Cache-Control
+  Cache-Control: no-store, no-transform
