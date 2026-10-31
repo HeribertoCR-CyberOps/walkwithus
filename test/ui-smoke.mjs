@@ -181,6 +181,35 @@ await (async () => {
   } catch (e) { failures.push(label); console.log("FAIL", label, "—", e.message.split("\n")[0]); }
   await ctx.close();
 })();
+// Cloudflare's bot check (cf-mitigated: challenge, HTML body) on an API call: the family sees a translated reload
+// instruction, a working reload button and 911, never a raw "HTTP 403".
+await (async () => {
+  const label = "edge challenge shows reload and 911";
+  // Service workers are blocked so page.route sees the request (Playwright cannot route requests a service worker makes).
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: "block" });
+  await ctx.addInitScript(() => { try { localStorage.setItem("wwu.lang", "es"); } catch {} });
+  const pg = await ctx.newPage();
+  // The walk form's own result box (the hidden offline banner also carries .result.err).
+  const BOX = "form:has(#w-cb) .result.err"; let step = "route";
+  try {
+    await pg.route("**/api/o/demo/walk", (r) => r.fulfill({ status: 403, contentType: "text/html",
+      headers: { "cf-mitigated": "challenge" }, body: "<!DOCTYPE html><title>Just a moment...</title>" }));
+    step = "load"; await pg.goto(B + "/?o=demo"); await pg.waitForSelector("#wh");
+    await pg.fill("#w-cb", "(718) 555-0100"); await pg.check("#w-consent");
+    await pg.click("form:has(#w-cb) button[type=submit]");
+    step = "error box"; await pg.waitForSelector(BOX);
+    const s = await pg.$eval(BOX, (n) => ({ text: n.textContent, has911: !!n.querySelector('a[href="tel:911"]'),
+      reload: [...n.querySelectorAll("button")].map((b) => b.textContent) }));
+    assert.ok(s.text.includes("verificación de seguridad"), "translated message: " + s.text);
+    assert.ok(!/HTTP 403/.test(s.text), "raw status leaked");
+    assert.ok(s.has911, "911 link"); assert.deepEqual(s.reload, ["Recargar la página"]);
+    step = "reload"; await pg.unroute("**/api/o/demo/walk");
+    await Promise.all([pg.waitForEvent("load"), pg.click(BOX + " button")]);
+    await pg.waitForSelector("#wh");
+    console.log("ok  ", label);
+  } catch (e) { failures.push(label); console.log("FAIL", label, "[" + step + "] —", e.message.split("\n")[0]); }
+  await ctx.close();
+})();
 // Offline: after one visit, the shell, the 911 link and the last schedule still render with no network.
 // Runs on Chromium only: Playwright's offline emulation with an active service worker fails inside its own WebKit build
 // ("internal error") and times out in Firefox, so on those engines it would test the harness, not the app.
