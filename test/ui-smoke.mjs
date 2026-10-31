@@ -19,7 +19,12 @@ try { pw = require("playwright"); }
 catch { pw = createRequire("/opt/node22/lib/node_modules/")("playwright"); }
 const chromium = pw[ENGINE];
 if (!chromium) throw new Error("unknown ENGINE " + ENGINE);
-const P = ".wrangler/ui-smoke", PORT = 8803, B = `http://127.0.0.1:${PORT}`;
+// WebKit applies the CSP's upgrade-insecure-requests even to 127.0.0.1 (Chromium and Firefox exempt loopback), so the
+// WebKit run serves the app over local HTTPS, exactly as production does. Loopback-only, self-signed: the test process and
+// browser contexts accept that one certificate; nothing else in the run relaxes TLS.
+const PROTO = ENGINE === "webkit" ? "https" : "http";
+if (PROTO === "https") process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+const P = ".wrangler/ui-smoke", PORT = 8803, B = `${PROTO}://127.0.0.1:${PORT}`;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = publicKey.export({ format: "jwk" });
 rmSync(P, { recursive: true, force: true }); mkdirSync(".wrangler", { recursive: true });
@@ -33,7 +38,7 @@ execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--pe
    INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${win};
    INSERT INTO coordinators (email,org_id,role) VALUES ('lead@demo.test',1,'admin'), ('coord@demo.test',1,'coordinator');`], { stdio: "ignore" });
 const LOGFD = openSync(".wrangler/ui-smoke.log", "w");
-const proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", P, "--ip", "127.0.0.1"],
+const proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", P, "--ip", "127.0.0.1", "--local-protocol", PROTO],
   { stdio: ["ignore", LOGFD, LOGFD], detached: true });
 const stop = () => { try { process.kill(-proc.pid, "SIGTERM"); } catch {} rmSync(".dev.vars", { force: true }); };
 process.on("exit", stop);
@@ -45,6 +50,7 @@ const tok = (email) => { const h = b64u(JSON.stringify({ alg: "RS256", kid: "k" 
 
 const { META } = await import(new URL("../public/js/strings.js", import.meta.url));
 const browser = await chromium.launch();
+{ const nc = browser.newContext.bind(browser); browser.newContext = (o = {}) => nc({ ...o, ignoreHTTPSErrors: PROTO === "https" }); }
 const failures = [];
 async function check(label, ctxOpts, url, assertions) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, ...ctxOpts.ctx });
@@ -72,8 +78,10 @@ for (const [code, m] of Object.entries(META)) for (const scheme of ["light", "da
     // Each emergency button must read as one phrase with its spaces intact ("Call 911", not "Call911").
     for (const id of ["sos911", "sostips", "soscrisis"]) {
       const t = await pg.$eval("#" + id, (n) => n.innerText);
-      const before = (/(.)\u2066/.exec(t) || [])[1];  // character just before the isolated number
-      assert.ok(!/\n/.test(t) && before !== undefined && /[\s\uFF1A]/.test(before), `${id} lost the space before its number: ${JSON.stringify(t)}`);
+      // Engines differ in whether innerText keeps bidi isolates (Firefox drops them), so strip them and look at the
+      // character right before the first digit: a space, a full-width colon (Chinese), or nothing (number first).
+      const plain = t.replace(/[\u2066-\u2069]/g, ""), at = plain.search(/[0-9]/), before = at > 0 ? plain[at - 1] : "";
+      assert.ok(!/\n/.test(t) && at >= 0 && (before === "" || /[\s\uFF1A]/.test(before)), `${id} lost the space before its number: ${JSON.stringify(t)}`);
     }
     assert.equal((await pg.$$(".corner")).length, 2);
     assert.ok((await pg.$$("#w-lang option")).length >= 14, "call languages");
