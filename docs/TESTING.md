@@ -35,7 +35,7 @@ Coordinator pages are `https://walk.savvysolutionpros.com/c.html?o=demo`. If you
 
 ### B. Volunteer
 1. On the family page, fill in "Volunteer with us" with a fake name and number. Read the rules and tick the box.
-2. Wait for the coordinator to approve you and give you your check-in link. In a real program this happens only after meeting in person.
+2. Wait for an admin to approve you and give you your check-in link. In a real program this happens only after meeting in person.
 3. Open the link, check in at a corner, then check out.
 
 ### C. Coordinator / admin (computer or tablet)

@@ -46,6 +46,10 @@ function chrome() {
   document.getElementById("soscrisis").replaceChildren(el("span", {}, ...numNodes(T().crisis)));
 }
 
+// After Cloudflare's bot check, a full reload shows the human check; once passed, the app works again.
+const reloadButton = (err) => err && err.code === "edge_challenge"
+  ? el("p", {}, el("button", { type: "button", text: T().reload, onclick: () => location.reload() })) : null;
+
 function result(box, ok, ...nodes) {
   box.className = "result " + (ok ? "ok" : "err");
   box.replaceChildren(...nodes.filter((n) => n != null && n !== false));
@@ -128,10 +132,10 @@ function walkCard() {
       form.reset(); date.value = today(); fillTimes(true);
     } catch (err) {
       // Server or network failure (not a validation error): give the family a human fallback right away.
-      const down = !err.status || err.status >= 500 || err.status === 429;
+      const down = !err.status || err.status >= 500 || err.status === 429 || err.code === "edge_challenge";
       const ph = state.org && state.org.public_phone;
       result(box, false, errText(err), down && ph ? el("p", {}, el("a", { href: "tel:" + ph.replace(/[^\d+]/g, ""), text: ph })) : null,
-        down ? el("p", {}, el("a", { href: "tel:911", text: T().danger })) : null);
+        down ? el("p", {}, el("a", { href: "tel:911", text: T().danger })) : null, reloadButton(err));
     }
     btn.disabled = false;
   });
@@ -160,7 +164,7 @@ function volunteerCard() {
       const r = await api(`/api/o/${encodeURIComponent(state.org.slug)}/volunteer`, "POST", { name: name.value, phone: ph.value,
         corners: prefs.filter((p) => p.checked).map((p) => Number(p.value)), briefing_ack: true });
       result(box, true, r.demo ? el("p", { class: "demo-note", text: T().demo_saved }) : null, T().applied); form.reset();
-    } catch (err) { result(box, false, errText(err)); }
+    } catch (err) { result(box, false, errText(err), reloadButton(err)); }
     btn.disabled = false;
   });
   return el("section", { class: "card", "aria-labelledby": "vh" }, el("h2", { id: "vh", text: T().vol_h }),
@@ -217,7 +221,7 @@ async function render() {
     content.replaceChildren(...[state.stale ? el("p", { class: "result err", text: T().stale }) : null,
       cornersCard(), state.corners.length ? (state.accepting ? walkCard() : notReadyCard()) : null, volunteerCard(), rightsCard(), privacyCard()].filter(Boolean));
   } catch (err) {
-    content.replaceChildren(el("p", { class: "result err", text: errText(err) }));
+    content.replaceChildren(el("p", { class: "result err", role: "alert", text: errText(err) }), reloadButton(err));
   }
 }
 
