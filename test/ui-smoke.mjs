@@ -77,7 +77,7 @@ for (const [code, m] of Object.entries(META)) for (const scheme of ["light", "da
     assert.ok(/1-800-577-TIPS/.test(text), "tips number in logical order");
     // Each emergency button must read as one phrase with its spaces intact ("Call 911", not "Call911").
     for (const id of ["sos911", "sostips", "soscrisis"]) {
-      const t = await pg.$eval("#" + id, (n) => n.innerText);
+      const t = (await pg.$eval("#" + id, (n) => n.innerText)).trim();   // WebKit appends a trailing line break
       // Engines differ in whether innerText keeps bidi isolates (Firefox drops them), so strip them and look at the
       // character right before the first digit: a space, a full-width colon (Chinese), or nothing (number first).
       const plain = t.replace(/[\u2066-\u2069]/g, ""), at = plain.search(/[0-9]/), before = at > 0 ? plain[at - 1] : "";
