@@ -18,7 +18,8 @@ function dowOf(dateStr) {
 // Unicode first-strong isolates keep phone numbers, times and codes left-to-right inside Arabic/Urdu text.
 const iso = (s) => "\u2068" + s + "\u2069";
 const NUM = /[0-9][0-9A-Z:–\-]*[0-9A-Z]/g;
-// Same isolation, but each number becomes a no-wrap span so "1-800-577-TIPS" never breaks across lines.
+// Same isolation, but each number becomes a no-wrap span so "1-800-577-TIPS" never breaks across lines. Callers wrap the
+// result in one inline span: the buttons are flex containers, which would otherwise drop the space before the number.
 const numNodes = (s) => { const out = []; let i = 0;
   for (const m of s.matchAll(NUM)) { out.push(s.slice(i, m.index), el("span", { class: "nowrap", text: "\u2066" + m[0] + "\u2069" })); i = m.index + m[0].length; }
   out.push(s.slice(i)); return out.filter((x) => x !== ""); };
@@ -38,9 +39,9 @@ function chrome() {
   const off = document.getElementById("offline");
   if (off) { off.textContent = T().offline; off.hidden = navigator.onLine; }
   document.getElementById("tagline").textContent = T().tagline;
-  document.getElementById("sos911").replaceChildren(...numNodes(T().danger));
-  document.getElementById("sostips").replaceChildren(...numNodes(T().tips));
-  document.getElementById("soscrisis").replaceChildren(...numNodes(T().crisis));
+  document.getElementById("sos911").replaceChildren(el("span", {}, ...numNodes(T().danger)));
+  document.getElementById("sostips").replaceChildren(el("span", {}, ...numNodes(T().tips)));
+  document.getElementById("soscrisis").replaceChildren(el("span", {}, ...numNodes(T().crisis)));
 }
 
 function result(box, ok, ...nodes) {
@@ -168,6 +169,19 @@ function privacyCard() {
     el("ul", {}, ...T().privacy.map((p) => el("li", { text: p }))));
 }
 
+function home(real, demo) {
+  const mail = "heriberto@savvysolutionpros.com";
+  return el("div", { class: "stack" },
+    el("section", { class: "card", "aria-labelledby": "hh" }, el("h2", { id: "hh", text: T().home_h }), el("p", { text: T().home_p }),
+      real.length
+        ? el("div", {}, el("h3", { text: T().pick_org }), el("ul", { class: "plain" }, ...real.map((o) => el("li", {},
+            el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: o.name }), o.borough ? el("span", { class: "muted", text: ` — ${o.borough}` }) : null))))
+        : el("p", { class: "result err", role: "status", text: T().home_none }),
+      demo ? el("p", {}, el("a", { href: "?o=demo", text: T().home_demo })) : null),
+    el("section", { class: "card", "aria-labelledby": "ho" }, el("h2", { id: "ho", text: T().home_org_h }), el("p", { text: T().home_org_p }),
+      el("p", {}, el("a", { href: `mailto:${mail}?subject=Walk%20With%20Us`, dir: "ltr", text: mail }))));
+}
+
 async function render() {
   chrome();
   const content = document.getElementById("content");
@@ -176,10 +190,10 @@ async function render() {
   try {
     if (!slug) {
       const { orgs } = await api("/api/orgs");
-      if (orgs.length === 1) { location.replace(`?o=${encodeURIComponent(orgs[0].slug)}`); return; }
-      content.replaceChildren(el("section", { class: "card" }, el("h2", { text: T().pick_org }),
-        el("ul", { class: "plain" }, ...orgs.map((o) => el("li", {}, el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: o.name }),
-          o.borough ? el("span", { class: "muted", text: ` — ${o.borough}` }) : null)))));
+      // The demo is never a destination on its own: a family landing here must not mistake made-up corners for a real program.
+      const real = orgs.filter((o) => o.slug !== "demo"), demo = orgs.some((o) => o.slug === "demo");
+      if (real.length === 1) { location.replace(`?o=${encodeURIComponent(real[0].slug)}`); return; }
+      content.replaceChildren(home(real, demo), rightsCard(), privacyCard());
       return;
     }
     if (!state.org || state.org.slug !== slug) {
