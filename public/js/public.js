@@ -185,7 +185,7 @@ function privacyCard() {
 }
 
 function home(real, demo) {
-  const mail = "heriberto@savvysolutionpros.com";
+  const mail = "intake@savvysolutionpros.com";
   return el("div", { class: "stack" },
     el("section", { class: "card", "aria-labelledby": "hh" }, el("h2", { id: "hh", text: T().home_h }), el("p", { text: T().home_p }),
       real.length
