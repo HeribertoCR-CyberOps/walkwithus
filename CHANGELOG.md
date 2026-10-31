@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2 — 2026-10-31
+- **Fix:** `randomString` threw for lengths above 32,768 characters because WebCrypto caps one `getRandomValues` call at 65,536 bytes. Random bytes are now drawn in chunks. Found by the new property tests; production only requests 6–43 characters, so the live service was never affected.
+- **Property-based tests** (fast-check, 1,000 generated cases per property in CI): seal/open round-trip for any Unicode, fresh IV per value, AAD binding across rows/fields/orgs, wrong-key rejection, any single-bit tamper detected, malformed ciphertext rejected, HMAC separation, base64/base64url round-trip, alphabet and length of random strings, chi-square test for modulo bias, 256-bit capability tokens, constant-time compare equals `===`.
+- CI: Playwright is now a pinned devDependency locked in `package-lock.json`; no unpinned `npm install` remains in any workflow.
+
 ## 1.1.1 — 2026-10-30
 - **Privacy fix found on the first live deploy:** the Cloudflare edge was injecting a Web Analytics beacon and bot-detection script into HTML pages. The CSP already blocked them, but they broke the "no third-party requests" promise. All pages now send `Cache-Control: no-transform`, which stops edge injection; coordinator and volunteer pages are `no-store, no-transform` on both their canonical (`/c`, `/v`) and `.html` URLs.
 - Monitor: new `no_injection` probe fails if any non-first-party `<script>` appears in the app shell or `no-transform` is missing.

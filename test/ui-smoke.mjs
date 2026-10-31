@@ -1,7 +1,7 @@
 // Browser smoke test: renders the family page in every language (light + dark, phone viewport) and the volunteer and
 // coordinator pages, against the real Worker. Fails on any JS error, any literal "null"/"undefined" in the page, a
 // missing 911 link, a wrong text direction, or reversed phone numbers in RTL languages.
-// Run: npm run test:ui   (needs Playwright + Chromium: `npx playwright@1.56.1 install --with-deps chromium` in CI)
+// Run: npm run test:ui   (Playwright is a pinned devDependency; first time: `npx playwright install --with-deps chromium`)
 import { spawn, execFileSync } from "node:child_process";
 import { randomBytes, generateKeyPairSync, sign } from "node:crypto";
 import { writeFileSync, openSync, rmSync, mkdirSync } from "node:fs";

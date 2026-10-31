@@ -60,6 +60,7 @@ Then: protect `/c.html*` and `/api/c/*` with a Cloudflare Access application, pu
 
 ```bash
 npm test          # 24 end-to-end tests: real Workers runtime + local D1 (auth, privacy wall, Rule of Two, rate limits, audit chain, purge, key-rotation drill)
+npm run test:property  # property-based tests of the crypto core (fast-check)
 npm run test:ui   # 26 browser checks: every language in light and dark, RTL, offline mode, volunteer and coordinator pages
 npm run typecheck
 node scripts/monitor.mjs https://<your-host> <org-slug>   # external availability probe

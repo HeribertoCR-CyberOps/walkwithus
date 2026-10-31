@@ -23,6 +23,9 @@ jobs:
       - run: npm run typecheck
       - name: Runtime dependency audit (the Worker ships zero runtime dependencies)
         run: npm audit --omit=dev --audit-level=low
+      - name: Property-based tests (fast-check, crypto core)
+        run: npm run test:property
+        env: { FC_RUNS: "1000" }
       - run: npm test
         env: { CI: "1", WRANGLER_SEND_METRICS: "false" }
       - name: SBOM (CycloneDX)
@@ -40,7 +43,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - run: npm ci
-      - run: npm install --no-save playwright@1.56.1 && npx playwright@1.56.1 install --with-deps chromium
+      - name: Install Chromium for the pinned Playwright (version locked in package-lock.json)
+        run: npx --no-install playwright install --with-deps chromium
       - run: npm run test:ui
         env: { CI: "1", WRANGLER_SEND_METRICS: "false" }
       - if: failure()
