@@ -1,6 +1,6 @@
 {
   "name": "walkwithus",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "private": true,
   "description": "Walk With Us — free, privacy-first safe-passage coordination for community organizations. Coordinates adults; never tracks children.",
   "license": "AGPL-3.0-only",
@@ -20,6 +20,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261031.1",
+    "axe-core": "4.10.3",
     "fast-check": "4.10.2",
     "playwright": "1.56.1",
     "typescript": "5.9.3",

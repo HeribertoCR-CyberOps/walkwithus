@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Walk With Us — Worker entry. Coordinates ADULTS on public corners. Never tracks children.
 // Routes:
 //   public      GET  /api/orgs                      list active orgs
@@ -19,6 +21,7 @@ export interface Env {
   TURNSTILE_SITEKEY?: string;
   WALK_DAILY_CAP?: string;     // per program, per NY day (default 100)
   APPLY_DAILY_CAP?: string;    // per program, per NY day (default 50)
+  REKEY_BATCH?: string;        // rows per table per maintenance run (default 300)
   APP_NAME: string;
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
@@ -27,7 +30,7 @@ export interface Env {
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.1.6";
+const VERSION = "1.1.7";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)
@@ -74,8 +77,9 @@ async function body<T extends Record<string, unknown>>(req: Request, allowed: re
   if (!(req.headers.get("content-type") || "").startsWith("application/json")) throw new HttpError(415, "json_required");
   const origin = req.headers.get("origin");
   if (origin && origin !== new URL(req.url).origin) throw new HttpError(403, "cross_origin");
+  if (Number(req.headers.get("content-length") || 0) > 4096) throw new HttpError(413, "too_large");   // before reading
   const text = await req.text();
-  if (text.length > 4096) throw new HttpError(413, "too_large");
+  if (text.length > 4096) throw new HttpError(413, "too_large");                                       // chunked bodies
   let obj: unknown;
   try { obj = JSON.parse(text); } catch { bad("bad_json"); }
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) bad("bad_json");
@@ -129,6 +133,10 @@ async function limit(env: Env, scope: string, subject: string, max: number, wind
   const ws = now - (now % windowSec);
   const day = new Date(now * 1000).toISOString().slice(0, 10);
   const k = await hmac(env.HMAC_KEY, `rate|${day}|${scope}|${subject}`);
+  // Already over the limit in this window: refuse with a read only. A flood of refused requests must not burn the
+  // database's write quota (which would stop check-ins and walk requests for every program on the account).
+  const cur = await env.DB.prepare("SELECT window_start, n FROM rate WHERE k=?").bind(k).first<{ window_start: number; n: number }>();
+  if (cur && cur.window_start === ws && cur.n > max) throw new HttpError(429, "rate_limited");
   const row = await env.DB.prepare(
     `INSERT INTO rate (k, window_start, n) VALUES (?1, ?2, 1)
      ON CONFLICT(k) DO UPDATE SET n = CASE WHEN window_start = ?2 THEN n + 1 ELSE 1 END, window_start = ?2
@@ -136,6 +144,19 @@ async function limit(env: Env, scope: string, subject: string, max: number, wind
   if ((row?.n ?? 0) > max) throw new HttpError(429, "rate_limited");
 }
 const clientIp = (req: Request) => req.headers.get("cf-connecting-ip") || "local";
+/** Rate-limit subject for a client network: the full IPv4 address, or the IPv6 /64 (one household or phone usually owns
+ *  a whole /64, so per-address IPv6 limits are trivially bypassed). Cloudflare's edge sets cf-connecting-ip itself. */
+export function netKey(ip: string): string {
+  const v4mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (v4mapped) return v4mapped[1]!;
+  if (!ip.includes(":")) return ip;
+  const addr = ip.split("%")[0]!.toLowerCase();
+  const [head, tail] = addr.includes("::") ? addr.split("::") as [string, string] : [addr, ""];
+  const h = head ? head.split(":") : [], t = tail ? tail.split(":") : [];
+  const groups = [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t];
+  return groups.slice(0, 4).map((g) => g.padStart(4, "0")).join(":") + "::/64";
+}
+const clientNet = (req: Request) => netKey(clientIp(req));
 
 async function turnstile(env: Env, token: unknown, req: Request): Promise<void> {
   if (!env.TURNSTILE_SECRET) return;
@@ -176,6 +197,15 @@ async function auditVerify(env: Env): Promise<{ ok: boolean; entries: number; br
 async function openAny(env: Env, aad: string, sealed: string): Promise<string> {
   try { return await open(env.DATA_KEY, aad, sealed); }
   catch (e) { if (!env.DATA_KEY_PREV) throw e; return await open(env.DATA_KEY_PREV, aad, sealed); }
+}
+// Volunteer fields are bound to (field, org, row): the row's phone_hmac is unique per org, so a ciphertext copied to
+// another volunteer, field or org fails to open. Rows sealed before 1.1.7 used (field, org) only; they still open via
+// the legacy binding and are re-sealed to the row-bound form by hourly maintenance.
+const volAad = (field: string, org: number, phHmac: string) => `volunteers|${field}|${org}|${phHmac}`;
+const volAadLegacy = (field: string, org: number) => `volunteers|${field}|${org}`;
+async function openVol(env: Env, field: string, org: number, phHmac: string, sealed: string): Promise<string> {
+  try { return await openAny(env, volAad(field, org, phHmac), sealed); }
+  catch { return await openAny(env, volAadLegacy(field, org), sealed); }
 }
 
 // ------------------------------------------------------------------ lookups
@@ -264,7 +294,7 @@ async function publicOrg(env: Env, slug: string): Promise<Response> {
 
 async function volunteerApply(req: Request, env: Env, slug: string): Promise<Response> {
   const o = await orgBySlug(env, slug);
-  await limit(env, "vol-ip", clientIp(req), 5, 3600);
+  await limit(env, "vol-ip", clientNet(req), 5, 3600);
   const b = await body<Record<string, unknown>>(req, ["name", "phone", "corners", "briefing_ack", "turnstile"]);
   await turnstile(env, b.turnstile, req);
   const name = str(b.name, 2, 80, "bad_name");
@@ -277,7 +307,7 @@ async function volunteerApply(req: Request, env: Env, slug: string): Promise<Res
   const cap = caps(env).apply, since = nyMidnight(Math.floor(Date.now() / 1000));
   if ((await todayCounts(env, o.id)).applications >= cap) throw new HttpError(429, "program_daily_limit");
   const phHash = await hmac(env.HMAC_KEY, "phone|" + ph);
-  const aad = (f: string) => `volunteers|${f}|${o.id}`;
+  const aad = (f: string) => volAad(f, o.id, phHash);
   const res = await env.DB.prepare(
     // The ceiling is re-checked inside the INSERT itself, so concurrent requests cannot overshoot it.
     `INSERT INTO volunteers (org_id, name_enc, phone_enc, phone_hmac, corners_pref, briefing_ack)
@@ -285,14 +315,15 @@ async function volunteerApply(req: Request, env: Env, slug: string): Promise<Res
      ON CONFLICT(org_id, phone_hmac) DO NOTHING`)
     .bind(o.id, await seal(env.DATA_KEY, aad("name"), name), await seal(env.DATA_KEY, aad("phone"), ph), phHash,
       JSON.stringify(prefs), since, cap).run();
-  // Same response whether new or duplicate: the endpoint does not reveal who has already applied.
-  if (res.meta.changes) await audit(env, o.id, "public", "volunteer_applied", "vol");
+  // Same response and the same work whether new or duplicate, so neither the body nor the timing reveals who has
+  // already applied. The audit entry records that an application arrived, not whose.
+  await audit(env, o.id, "public", "volunteer_application_received", res.meta.changes ? "vol" : "vol");
   return json({ ok: true, next }, 202);
 }
 
 async function walkRequest(req: Request, env: Env, slug: string): Promise<Response> {
   const o = await orgBySlug(env, slug);
-  await limit(env, "walk-ip", clientIp(req), 5, 3600);
+  await limit(env, "walk-ip", clientNet(req), 5, 3600);
   const b = await body<Record<string, unknown>>(req, ["corner_id", "date", "time", "callback", "lang", "consent", "turnstile"]);
   await turnstile(env, b.turnstile, req);
   const ready = await readiness(env, o);
@@ -339,8 +370,8 @@ async function walkRequest(req: Request, env: Env, slug: string): Promise<Respon
 async function volunteerByToken(env: Env, token: unknown) {
   if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new HttpError(401, "bad_token");
   const h = await sha256("cap|" + token);
-  const v = await env.DB.prepare("SELECT id, org_id, name_enc FROM volunteers WHERE token_hash=? AND status='approved'")
-    .bind(h).first<{ id: number; org_id: number; name_enc: string }>();
+  const v = await env.DB.prepare("SELECT id, org_id, name_enc, phone_hmac FROM volunteers WHERE token_hash=? AND status='approved'")
+    .bind(h).first<{ id: number; org_id: number; name_enc: string; phone_hmac: string }>();
   if (!v) throw new HttpError(401, "bad_token");
   await limit(env, "vol-token", h, 60, 3600);
   return v;
@@ -360,7 +391,7 @@ async function volunteerApi(req: Request, env: Env, action: string): Promise<Res
       .bind(v.id, now).all()).results;
     const corners = (await env.DB.prepare("SELECT id, label FROM corners WHERE org_id=? AND active=1 ORDER BY label")
       .bind(v.org_id).all()).results;
-    const name = await openAny(env, `volunteers|name|${v.org_id}`, v.name_enc);
+    const name = await openVol(env, "name", v.org_id, v.phone_hmac, v.name_enc);
     return json({ first_name: name.split(/\s+/)[0], shift, walks, corners });
   }
   if (action === "checkin") {
@@ -409,6 +440,10 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
   const [res, rid, verb] = rest;
 
   if (req.method === "GET" && res === "dashboard") {
+    // Who looked at walk times and volunteer names is itself recorded, at most once per coordinator per 10 minutes.
+    const lastView = await env.DB.prepare(
+      "SELECT ts FROM audit WHERE org_id=? AND actor=? AND action='dashboard_viewed' ORDER BY seq DESC LIMIT 1").bind(org.id, actor).first<{ ts: number }>();
+    if (!lastView || now - lastView.ts >= 600) await audit(env, org.id, actor, "dashboard_viewed", "dashboard");
     const corners = (await env.DB.prepare(
       `SELECT c.id, c.label, c.cross_streets, c.active,
               (SELECT COUNT(*) FROM shifts s WHERE s.corner_id=c.id AND s.checkout_at IS NULL) AS adults_now
@@ -418,8 +453,8 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
        FROM walk_requests w JOIN corners c ON c.id=w.corner_id
        WHERE w.org_id=? AND w.status IN ('open','assigned') ORDER BY w.slot_start`).bind(org.id).all()).results;
     const vrows = (await env.DB.prepare(
-      "SELECT id, name_enc, phone_enc, status, corners_pref, created_at FROM volunteers WHERE org_id=? AND status<>'suspended' ORDER BY status, created_at")
-      .bind(org.id).all<{ id: number; name_enc: string; phone_enc: string; status: string; corners_pref: string; created_at: number }>()).results;
+      "SELECT id, name_enc, phone_enc, phone_hmac, status, corners_pref, created_at FROM volunteers WHERE org_id=? AND status<>'suspended' ORDER BY status, created_at")
+      .bind(org.id).all<{ id: number; name_enc: string; phone_enc: string; phone_hmac: string; status: string; corners_pref: string; created_at: number }>()).results;
     // One unreadable record (corruption, or a key it was not sealed under) must never take the whole dashboard down:
     // it is shown as unreadable, logged without personal data, and counted for the readiness probe.
     const volunteers = [];
@@ -427,8 +462,8 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     for (const v of vrows) {
       let name: string | null = null, masked: string | null = null;
       try {
-        name = await openAny(env, `volunteers|name|${org.id}`, v.name_enc);
-        masked = "•••-•••-" + (await openAny(env, `volunteers|phone|${org.id}`, v.phone_enc)).slice(-4);
+        name = await openVol(env, "name", org.id, v.phone_hmac, v.name_enc);
+        masked = "•••-•••-" + (await openVol(env, "phone", org.id, v.phone_hmac, v.phone_enc)).slice(-4);
       } catch (e) {
         unreadable++; name = null; masked = null;
         log("error", "decrypt_failed", { table: "volunteers", id: v.id, err: (e as Error).name });
@@ -451,10 +486,13 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
   if (res === "volunteers" && rid && (verb === "approve" || verb === "suspend" || verb === "reveal")) {
     await body(req, []);
     const vid = int(Number(rid), "bad_id");
-    const v = await env.DB.prepare("SELECT id, status, phone_enc FROM volunteers WHERE id=? AND org_id=?").bind(vid, org.id)
-      .first<{ id: number; status: string; phone_enc: string }>();
+    const v = await env.DB.prepare("SELECT id, status, phone_enc, phone_hmac FROM volunteers WHERE id=? AND org_id=?").bind(vid, org.id)
+      .first<{ id: number; status: string; phone_enc: string; phone_hmac: string }>();
     if (!v) throw new HttpError(404, "no_volunteer");
     if (verb === "approve") {
+      // Approving (or re-issuing a link) creates someone who can be sent to walk with a child: admins only. A single
+      // compromised coordinator account must not be able to enrol people and then assign them to families.
+      if (role !== "admin") throw new HttpError(403, "admin_only");
       const tok = capabilityToken();
       await env.DB.prepare("UPDATE volunteers SET status='approved', token_hash=?, approved_by=?, approved_at=? WHERE id=?")
         .bind(await sha256("cap|" + tok), actor, now, vid).run();
@@ -465,17 +503,22 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
         note: "Shown once. Give it to the volunteer in person or by Signal. Approving again rotates it." });
     }
     if (verb === "suspend") {
-      await env.DB.batch([
+      // Suspension takes effect everywhere at once: link revoked, open shift closed, and every upcoming walk this person
+      // was assigned to goes back to "open" so a coordinator must assign two other adults (Rule of Two never silently broken).
+      const r = await env.DB.batch([
         env.DB.prepare("UPDATE volunteers SET status='suspended', token_hash=NULL WHERE id=?").bind(vid),
         env.DB.prepare("UPDATE shifts SET checkout_at=? WHERE volunteer_id=? AND checkout_at IS NULL").bind(now, vid),
+        env.DB.prepare("UPDATE walk_requests SET status='open', v1=NULL, v2=NULL WHERE org_id=? AND status='assigned' AND (v1=? OR v2=?)")
+          .bind(org.id, vid, vid),
       ]);
-      await audit(env, org.id, actor, "volunteer_suspended", `vol:${vid}`);
+      const reopened = r[2]?.meta.changes ?? 0;
+      await audit(env, org.id, actor, "volunteer_suspended", `vol:${vid}|walks_reopened:${reopened}`);
       await invalidateOrg(org.slug);   // readiness may have changed
-      return json({ ok: true });
+      return json({ ok: true, walks_reopened: reopened });
     }
     await revealGuard(env, org.id, actor);
     await audit(env, org.id, actor, "volunteer_phone_revealed", `vol:${vid}`);
-    return json({ phone: await openAny(env, `volunteers|phone|${org.id}`, v.phone_enc) });
+    return json({ phone: await openVol(env, "phone", org.id, v.phone_hmac, v.phone_enc) });
   }
 
   if (res === "walks" && rid && /^[0-9a-z]{26}$/.test(rid)) {
@@ -525,7 +568,8 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
   }
   if (res === "corners" && rid && verb === "deactivate") {
     await body(req, []);
-    await env.DB.prepare("UPDATE corners SET active=0 WHERE id=? AND org_id=?").bind(int(Number(rid), "bad_id"), org.id).run();
+    const u = await env.DB.prepare("UPDATE corners SET active=0 WHERE id=? AND org_id=?").bind(int(Number(rid), "bad_id"), org.id).run();
+    if (!u.meta.changes) throw new HttpError(404, "no_corner");
     await audit(env, org.id, actor, "corner_deactivated", `corner:${rid}`);
     await invalidateOrg(org.slug);
     return json({ ok: true });
@@ -543,18 +587,37 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     await invalidateOrg(org.slug);
     return json({ ok: true }, 201);
   }
-  if (res === "coordinators" && !rid) {
-    const b = await body<Record<string, unknown>>(req, ["email", "role"]);
+  if (res === "coordinators" && (!rid || rid === "remove")) {
+    const b = await body<Record<string, unknown>>(req, rid === "remove" ? ["email"] : ["email", "role"]);
     const email = str(b.email, 6, 254, "bad_email").toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) bad("bad_email");
+    if (email === actor) bad("cannot_change_own_access");   // another admin must do it: no silent self-escalation or lock-out
+    const cur = await env.DB.prepare("SELECT role FROM coordinators WHERE email=? AND org_id=?").bind(email, org.id).first<{ role: string }>();
+    const admins = (await env.DB.prepare("SELECT COUNT(*) AS n FROM coordinators WHERE org_id=? AND role='admin'").bind(org.id).first<{ n: number }>())?.n ?? 0;
+    // The audit names the person changed (as a keyed hash, so the log holds no email) and the exact transition.
+    const target = "coord:" + (await hmac(env.HMAC_KEY, "email|" + email)).slice(0, 16);
+    if (rid === "remove") {
+      if (!cur) throw new HttpError(404, "no_coordinator");
+      if (cur.role === "admin" && admins <= 1) bad("last_admin");
+      await env.DB.prepare("DELETE FROM coordinators WHERE email=? AND org_id=?").bind(email, org.id).run();
+      await audit(env, org.id, actor, "coordinator_removed", `${target}|${cur.role}->none`);
+      await invalidateOrg(org.slug);
+      return json({ ok: true });
+    }
     const r = b.role === "admin" ? "admin" : "coordinator";
+    if (cur?.role === "admin" && r !== "admin" && admins <= 1) bad("last_admin");
     await env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,?) ON CONFLICT DO UPDATE SET role=excluded.role")
       .bind(email, org.id, r).run();
-    await audit(env, org.id, actor, "coordinator_set", `${r}`);
+    await audit(env, org.id, actor, "coordinator_set", `${target}|${cur?.role ?? "none"}->${r}`);
     await invalidateOrg(org.slug);
     return json({ ok: true });
   }
-  if (res === "audit" && rid === "verify") return json(await auditVerify(env));
+  if (res === "audit" && rid === "verify") {
+    await body(req, []);
+    const v = await auditVerify(env);
+    const mine = (await env.DB.prepare("SELECT COUNT(*) AS n FROM audit WHERE org_id=?").bind(org.id).first<{ n: number }>())?.n ?? 0;
+    return json({ ok: v.ok, entries: mine, ...(v.ok ? {} : { broken: true }) });
+  }
   throw new HttpError(404, "not_found");
 }
 
@@ -589,29 +652,69 @@ async function setStatus(env: Env, k: string, v: unknown): Promise<void> {
 }
 
 /** Key rotation, healed in the background: any row still sealed under DATA_KEY_PREV is re-sealed under DATA_KEY. */
-export async function rekey(env: Env, batch = 300): Promise<{ resealed: number; failed: number; pending: boolean }> {
-  if (!env.DATA_KEY_PREV) return { resealed: 0, failed: 0, pending: false };
+// Re-seals stored ciphertext to the current form: under DATA_KEY (during a key rotation) and, for volunteers, with the
+// row-bound AAD. Works through each table with a persistent cursor (id order), so every row is reached however large the
+// tables are. A pass is complete only when a full sweep of both tables found nothing left to do; until then `pending`
+// stays true and DATA_KEY_PREV must not be removed. Rows that cannot be opened under any key are counted in `failed`
+// (and surfaced by the readiness probe) instead of blocking progress.
+interface RekeyState { vol: number; walk: string; work: number; failed: number; done: boolean; passes: number }
+export async function rekey(env: Env, batch = Math.max(1, Number(env.REKEY_BATCH) || 300)):
+    Promise<{ resealed: number; failed: number; pending: boolean; passes: number }> {
+  const row = await env.DB.prepare("SELECT v FROM system_status WHERE k='rekey_state'").first<{ v: string }>();
+  let st: RekeyState = row ? JSON.parse(row.v) : { vol: 0, walk: "", work: 0, failed: 0, done: false, passes: 0 };
+  // A finished pass stays finished until something new needs re-sealing: a rotation starts (DATA_KEY_PREV set).
+  if (st.done && !env.DATA_KEY_PREV) return { resealed: 0, failed: st.failed, pending: false, passes: st.passes };
+  if (st.done && env.DATA_KEY_PREV) st = { vol: 0, walk: "", work: 0, failed: 0, done: false, passes: st.passes };
   let resealed = 0, failed = 0;
-  const reseal = async (aad: string, sealed: string): Promise<string | null> => {
-    try { await open(env.DATA_KEY, aad, sealed); return null; } catch { /* not under the current key */ }
-    try { return await seal(env.DATA_KEY, aad, await open(env.DATA_KEY_PREV!, aad, sealed)); } catch { failed++; return null; }
+  const current = async (aad: string, sealed: string) => { try { await open(env.DATA_KEY, aad, sealed); return true; } catch { return false; } };
+  const plain = async (aads: string[], sealed: string): Promise<string | null> => {
+    for (const a of aads) for (const k of [env.DATA_KEY, env.DATA_KEY_PREV]) {
+      if (!k) continue;
+      try { return await open(k, a, sealed); } catch { /* try next */ }
+    }
+    return null;
   };
-  const vols = (await env.DB.prepare("SELECT id, org_id, name_enc, phone_enc FROM volunteers LIMIT ?").bind(batch)
-    .all<{ id: number; org_id: number; name_enc: string; phone_enc: string }>()).results;
+  const vols = (await env.DB.prepare("SELECT id, org_id, name_enc, phone_enc, phone_hmac FROM volunteers WHERE id > ? ORDER BY id LIMIT ?")
+    .bind(st.vol, batch).all<{ id: number; org_id: number; name_enc: string; phone_enc: string; phone_hmac: string }>()).results;
   for (const v of vols) {
-    const n = await reseal(`volunteers|name|${v.org_id}`, v.name_enc), ph = await reseal(`volunteers|phone|${v.org_id}`, v.phone_enc);
-    if (n || ph) {
-      await env.DB.prepare("UPDATE volunteers SET name_enc=?, phone_enc=? WHERE id=?").bind(n ?? v.name_enc, ph ?? v.phone_enc, v.id).run();
+    const out: string[] = [];
+    for (const [f, sealed] of [["name", v.name_enc], ["phone", v.phone_enc]] as const) {
+      const aad = volAad(f, v.org_id, v.phone_hmac);
+      if (await current(aad, sealed)) { out.push(sealed); continue; }
+      const pt = await plain([aad, volAadLegacy(f, v.org_id)], sealed);
+      if (pt === null) { failed++; out.push(sealed); continue; }
+      out.push(await seal(env.DATA_KEY, aad, pt));
+    }
+    if (out[0] !== v.name_enc || out[1] !== v.phone_enc) {
+      await env.DB.prepare("UPDATE volunteers SET name_enc=?, phone_enc=? WHERE id=?").bind(out[0], out[1], v.id).run();
       resealed++;
     }
   }
-  const walks = (await env.DB.prepare("SELECT id, org_id, callback_enc FROM walk_requests LIMIT ?").bind(batch)
-    .all<{ id: string; org_id: number; callback_enc: string }>()).results;
+  const walks = (await env.DB.prepare("SELECT id, org_id, callback_enc FROM walk_requests WHERE id > ? ORDER BY id LIMIT ?")
+    .bind(st.walk, batch).all<{ id: string; org_id: number; callback_enc: string }>()).results;
   for (const w of walks) {
-    const c = await reseal(`walk|callback|${w.org_id}|${w.id}`, w.callback_enc);
-    if (c) { await env.DB.prepare("UPDATE walk_requests SET callback_enc=? WHERE id=?").bind(c, w.id).run(); resealed++; }
+    const aad = `walk|callback|${w.org_id}|${w.id}`;
+    if (await current(aad, w.callback_enc)) continue;
+    const pt = await plain([aad], w.callback_enc);
+    if (pt === null) { failed++; continue; }
+    await env.DB.prepare("UPDATE walk_requests SET callback_enc=? WHERE id=?").bind(await seal(env.DATA_KEY, aad, pt), w.id).run();
+    resealed++;
   }
-  return { resealed, failed, pending: vols.length === batch || walks.length === batch };
+  // Advance cursors; a table whose batch came back short has been swept to the end.
+  const volEnd = vols.length < batch, walkEnd = walks.length < batch;
+  st.vol = volEnd ? st.vol : vols[vols.length - 1]!.id;
+  st.walk = walkEnd ? st.walk : walks[walks.length - 1]!.id;
+  st.work += resealed; st.failed += failed;
+  const swept = volEnd && walkEnd;
+  if (swept) {
+    st.passes++;
+    // Complete only if this whole sweep had nothing to re-seal (rows re-sealed during it are verified on the next sweep).
+    if (st.work === 0) st.done = true;
+    else st = { vol: 0, walk: "", work: 0, failed: 0, done: false, passes: st.passes };
+  }
+  await env.DB.prepare("INSERT INTO system_status (k, v, at) VALUES ('rekey_state', ?, unixepoch()) ON CONFLICT(k) DO UPDATE SET v=excluded.v, at=excluded.at")
+    .bind(JSON.stringify(st)).run();
+  return { resealed, failed: swept && st.done ? st.failed : failed, pending: !st.done, passes: st.passes };
 }
 
 /** Runs hourly. Each step is isolated: one failing step never blocks the others, and every outcome is recorded. */
@@ -636,6 +739,7 @@ export async function maintain(env: Env): Promise<Record<string, unknown>> {
 /** Readiness: DB reachable, keys well-formed, maintenance recent and green, audit chain intact. No personal data. */
 async function health(env: Env): Promise<Response> {
   const checks: Record<string, unknown> = {};
+  const internal: Record<string, unknown> = {};
   const keyOk = (k?: string) => { try { return !!k && atob(k).length >= 32; } catch { return false; } };
   checks.keys = keyOk(env.DATA_KEY) && keyOk(env.HMAC_KEY) && (!env.DATA_KEY_PREV || keyOk(env.DATA_KEY_PREV));
   checks.rotation_in_progress = !!env.DATA_KEY_PREV;
@@ -646,7 +750,14 @@ async function health(env: Env): Promise<Response> {
     dbOk = true;
     const rows = (await env.DB.prepare("SELECT k, v, at FROM system_status").all<{ k: string; v: string; at: number }>()).results;
     const now = Math.floor(Date.now() / 1000);
-    for (const r of rows) checks[r.k] = { ...JSON.parse(r.v), age_s: now - r.at };
+    for (const r of rows) internal[r.k] = { ...JSON.parse(r.v), age_s: now - r.at };
+    // Public view: pass/fail and age only. Counts (rows purged, audit entries, re-seal progress) would let an outsider
+    // estimate how many families use a program, so they stay internal.
+    for (const [k, v] of Object.entries(internal)) {
+      if (k === "rekey_state") continue;
+      const x = v as { ok?: boolean; age_s?: number; result?: { ok?: boolean } };
+      checks[k] = { ok: x.ok === true && (x.result?.ok ?? true) !== false, age_s: x.age_s };
+    }
   } catch { /* reported below */ }
   checks.db = dbOk;
   if (dbOk) {
@@ -659,13 +770,17 @@ async function health(env: Env): Promise<Response> {
       checks.programs = { total: p?.total ?? 0, demo: p?.demo ?? 0, accepting_walks: p?.accepting ?? 0 };
     } catch { /* informational only */ }
   }
-  const pg = checks.purge as { ok?: boolean; age_s?: number } | undefined;
-  const audit = checks.audit_verify as { ok?: boolean; result?: { ok?: boolean } } | undefined;
+  const pg = internal.purge as { ok?: boolean; age_s?: number } | undefined;
+  const audit = internal.audit_verify as { ok?: boolean; result?: { ok?: boolean } } | undefined;
+  const rk = internal.rekey_state as { done?: boolean; failed?: number } | undefined;
+  checks.rekey_pending = !!rk && !rk.done;
   const problems: string[] = [];
   if (!dbOk) problems.push("db_unreachable");
   if (!checks.keys) problems.push("keys_invalid");
   if (pg && (!pg.ok || (pg.age_s ?? 0) > 3 * 3600)) problems.push("maintenance_stale_or_failing");
   if (audit && audit.result && audit.result.ok === false) problems.push("audit_chain_broken");
+  if (rk && (rk.failed ?? 0) > 0) problems.push("rekey_unreadable_rows");              // data that no configured key can open
+  if (env.TURNSTILE_SECRET) problems.push("turnstile_secret_set_but_ui_not_wired");      // would make both public forms fail
   return json({ ok: problems.length === 0, version: VERSION, problems, checks }, problems.length ? 503 : 200);
 }
 
@@ -674,7 +789,7 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
   if (!env.DATA_KEY || !env.HMAC_KEY) throw new HttpError(503, "not_configured");
   if (req.method === "GET" && p[1] === "health" && p.length === 2) return json({ ok: true, version: VERSION });
   if (req.method === "GET" && p[1] === "health" && p[2] === "ready") {
-    await limit(env, "health", clientIp(req), 120, 3600);
+    await limit(env, "health", clientNet(req), 120, 3600);
     return await health(env);
   }
   if (req.method === "GET" && p[1] === "orgs" && p.length === 2) {

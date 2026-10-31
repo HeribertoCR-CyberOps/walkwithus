@@ -15,13 +15,13 @@ npx wrangler deploy
 
 Custom domain (optional): Workers & Pages → walkwithus → Settings → Domains & Routes → add e.g. `walk.example.org`.
 
-## 2. Bot protection (recommended before public launch)
+## 2. Bot and flood protection (recommended before public launch)
 
-Cloudflare → Turnstile → add widget for your hostname (Managed mode). Then:
-```bash
-npx wrangler secret put TURNSTILE_SECRET
-```
-and set `TURNSTILE_SITEKEY` in `wrangler.jsonc` vars. *(The v1 public page already reads the site key; the widget script embed is the one remaining front-end step before enabling the secret.)*
+Built in, nothing to configure: per-network rate limits (IPv4 address or IPv6 /64), per-number limits, per-program daily ceilings, and the readiness gate. Refused requests cost a database read, not a write.
+
+**Recommended edge layer:** Cloudflare → your zone → Security → WAF → **Rate limiting rules** → match `http.request.uri.path wildcard "/api/o/*"` and method `POST`, characteristics *IP*, **10 requests per 1 minute**, action *Block* for 10 minutes. This stops floods before they reach the Worker or the database, and the free plan includes one rule.
+
+**Turnstile is not wired into the pages yet.** Do **not** set `TURNSTILE_SECRET`: the server would then require a token the pages never send, and both public forms would fail. The readiness probe reports `turnstile_secret_set_but_ui_not_wired` if it is set. Adding the widget also means allowing `https://challenges.cloudflare.com` in the CSP, which ends the "no third-party requests" promise; decide that deliberately.
 
 ## 3. Coordinator sign-in (Cloudflare Access)
 
@@ -67,7 +67,9 @@ Public page for the org: `https://<host>/?o=example-slug` — print it as a QR c
 
 1. `npx wrangler secret put DATA_KEY_PREV` ← paste the **current** key.
 2. `openssl rand -base64 32 | npx wrangler secret put DATA_KEY` (store the new key in the password manager).
-3. Watch `/api/health/ready` → `checks.rekey`. Hourly maintenance re-seals up to 300 records per table per run; repeat until `pending:false`.
+3. Watch `/api/health/ready` → `checks.rekey_pending`. Hourly maintenance walks both tables with a saved cursor, re-sealing up to `REKEY_BATCH` (300) rows per table per run, and reports done only after a complete sweep finds nothing left. **Do not continue while `rekey_pending` is `true`**, or while `problems` contains `rekey_unreadable_rows` (data no configured key can open: investigate before removing anything).
 4. `npx wrangler secret delete DATA_KEY_PREV`. `rotation_in_progress` turns false.
+
+The same sweep also upgrades volunteer records sealed before 1.1.7 to the row-bound encryption binding, with no rotation needed. It runs once after deploying 1.1.7 and reports done.
 
 The rotation drill in the test suite exercises exactly this sequence.

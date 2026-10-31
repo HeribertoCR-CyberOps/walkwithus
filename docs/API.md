@@ -10,7 +10,7 @@ All endpoints live under `/api/`. Everything else is served as static files from
 | Same-origin | A request carrying an `Origin` header from another site is refused (`403 cross_origin`). |
 | Responses | JSON with `cache-control: no-store` (except the public schedule) and the full security header set (CSP `default-src 'none'`, HSTS, `nosniff`, `no-referrer`, `DENY` framing). Each response has `x-request-id`. |
 | Errors | `{ "error": "<code>", "request_id": "…" }`. Codes are stable and translated by the front end. Validation codes are `400`. |
-| Rate limits | Per network (daily-salted keyed hash of the IP, never the raw IP): 5 walk requests and 5 applications per hour. Per callback number: 3 walk requests per day. `429 rate_limited`. |
+| Rate limits | Per network (IPv4 address or IPv6 /64, as a daily-salted keyed hash — never the raw IP); a refused request costs a read, not a write: 5 walk requests and 5 applications per hour. Per callback number: 3 walk requests per day. `429 rate_limited`. |
 | Daily ceilings | Per program, per New York day, counted from stored rows and re-checked inside the `INSERT` (a concurrent burst cannot overshoot): `WALK_DAILY_CAP` walk requests (default 100), `APPLY_DAILY_CAP` volunteer applications (default 50). `429 program_daily_limit`; the family page then shows the organization's phone and 911. |
 | Readiness | A program takes walk requests only with ≥ 1 coordinator **and** ≥ 2 approved adults (Rule of Two). Otherwise `409 program_not_ready`, and the public page shows a notice instead of the form. Applications stay open, because that is how a program gets its adults. |
 | Demo programs | `orgs.demo = 1`. Forms validate exactly like a real program but **nothing is stored or audited**; responses carry `demo: true`. |
@@ -21,7 +21,7 @@ All endpoints live under `/api/`. Everything else is served as static files from
 | Method & path | Auth | Response |
 |---|---|---|
 | `GET /api/health` | none | `{ ok, version }` — liveness |
-| `GET /api/health/ready` | none | `{ ok, version, problems[], checks{ keys, db, access_configured, rotation_in_progress, programs{ total, demo, accepting_walks }, purge, audit_verify, rekey } }` — readiness; `503` with `problems[]` when degraded (e.g. `db_unreachable`, `maintenance_stale_or_failing`, `audit_chain_broken`) |
+| `GET /api/health/ready` | none | `{ ok, version, problems[], checks{ keys, db, access_configured, rotation_in_progress, rekey_pending, programs{ total, demo, accepting_walks }, purge{ ok, age_s }, audit_verify{ ok, age_s }, rekey{ ok, age_s } } }`; problems include `rekey_unreadable_rows` and `turnstile_secret_set_but_ui_not_wired`. Activity counts are never published — readiness; `503` with `problems[]` when degraded (e.g. `db_unreachable`, `maintenance_stale_or_failing`, `audit_chain_broken`) |
 
 ## Public (families and volunteers)
 
@@ -52,19 +52,20 @@ Every request needs a valid Cloudflare Access JWT (`Cf-Access-Jwt-Assertion`): R
 |---|---|---|---|
 | `GET /api/c/me` | any | — | `{ email, orgs[{ slug, name, role }] }` |
 | `GET /api/c/:slug/dashboard` | coordinator | — | `{ org, you{ email, role }, readiness{ coordinators, approved_adults, min_approved_adults, accepting_walks }, today{ walks, walk_cap, applications, apply_cap, walks_near_cap, applications_near_cap }, unreadable_records, corners, walks, volunteers, on_shift, … }`. An undecryptable record is shown as `unreadable: true` (name and phone `null`) instead of failing the dashboard. Also: corners right now, open walks, volunteers (names decrypted, **phones masked**; callbacks never included) |
-| `POST /api/c/:slug/volunteers/:id/approve` | coordinator | `{}` | Approves, or rotates the link: `{ checkin_link }`, **shown once** |
-| `POST /api/c/:slug/volunteers/:id/suspend` | coordinator | `{}` | Revokes the link immediately and closes any open shift |
+| `POST /api/c/:slug/volunteers/:id/approve` | **admin** | `{}` | Approves, or rotates the link: `{ checkin_link }`, **shown once** |
+| `POST /api/c/:slug/volunteers/:id/suspend` | coordinator | `{}` | Revokes the link immediately, closes any open shift, and reopens every upcoming walk assigned to them: `{ ok, walks_reopened }` |
 | `POST /api/c/:slug/volunteers/:id/reveal` | coordinator | `{}` | `{ phone }`, audited, capped at 30 reveals per coordinator per hour |
 | `POST /api/c/:slug/walks/:id/reveal` | coordinator | `{}` | `{ callback }`, audited, same cap |
 | `POST /api/c/:slug/walks/:id/assign` | coordinator | `{ v1, v2 }` | Two **distinct approved** adults (Rule of Two; also enforced by a database `CHECK`) |
 | `POST /api/c/:slug/walks/:id/close` | coordinator | `{ status: "done" \| "cancelled" }` | `done` only from `assigned` |
 | `POST /api/c/:slug/corners` | admin | `{ label, cross_streets, lat, lon }` | `201 { id }`; coordinates must be inside NYC, rounded to ~1 m |
-| `POST /api/c/:slug/corners/:id/deactivate` | admin | `{}` | Hides the corner from the public schedule |
+| `POST /api/c/:slug/corners/:id/deactivate` | admin | `{}` | Hides the corner from the public schedule; `404 no_corner` if it is not this program's |
 | `POST /api/c/:slug/windows` | admin | `{ corner_id, dow 0–6, start "HH:MM", end "HH:MM" }` | `201`; 15-minute grid |
-| `POST /api/c/:slug/coordinators` | admin | `{ email, role: "coordinator" \| "admin" }` | Adds the person or changes their role |
-| `POST /api/c/:slug/audit/verify` | admin | `{}` | Re-verifies the append-only hash chain: `{ ok, entries }` |
+| `POST /api/c/:slug/coordinators` | admin | `{ email, role: "coordinator" \| "admin" }` | Adds the person or changes their role. `cannot_change_own_access`; `last_admin` if it would leave no admin |
+| `POST /api/c/:slug/coordinators/remove` | admin | `{ email }` | Removes a coordinator. `cannot_change_own_access`, `last_admin`, `no_coordinator` |
+| `POST /api/c/:slug/audit/verify` | admin | `{}` | Re-verifies the append-only hash chain: `{ ok, entries }` (entries for this program only) |
 
-Every coordinator action writes an audit entry (actor, action, target, time) to the append-only, hash-chained `audit` table. Database triggers block `UPDATE` and `DELETE` on it, and `UNIQUE(prev)` prevents forks.
+Every coordinator action writes an audit entry (actor, action, target, time; people are named by keyed hash, never by email or phone), and dashboard views are recorded at most once per coordinator per 10 minutes to the append-only, hash-chained `audit` table. Database triggers block `UPDATE` and `DELETE` on it, and `UNIQUE(prev)` prevents forks.
 
 ## Scheduled maintenance (cron, hourly at :17)
 

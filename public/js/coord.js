@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 import { el, api, hhmm } from "./i18n.js";
 
 const fmt = (s) => new Date(s * 1000).toLocaleString(undefined, { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -81,13 +83,14 @@ function volunteersSection() {
       el("td", {}, el("div", { class: "row" },
         el("button", { class: "secondary", text: "Phone", onclick: () => act(box, async () => { const r = await api(base + "/reveal", "POST", {});
           note(box, true, el("a", { href: "tel:" + r.phone, text: r.phone }), el("small", { class: "muted", text: " (logged)" })); }) }),
+        D.you.role !== "admin" ? el("span", { class: "muted", text: v.status === "approved" ? "" : "Approval: an admin" }) :
         el("button", { text: v.status === "approved" ? "New link" : "Approve (met in person)", onclick: () => act(box, async () => {
           if (v.status !== "approved" && !confirm(`Approve ${v.name || "this record"}? Only approve someone you have met in person and briefed.`)) return;
           const r = await api(base + "/approve", "POST", {});
           note(box, true, el("div", { text: "Check-in link (shown once — give it in person or by Signal):" }), el("div", { class: "mono", text: r.checkin_link }),
             el("button", { class: "secondary", text: "Copy", onclick: async () => { try { await navigator.clipboard.writeText(r.checkin_link); } catch {} } }));
         }) }),
-        el("button", { class: "danger", text: "Suspend", onclick: () => act(box, async () => { if (!confirm(`Suspend ${v.name}? Their link stops working immediately.`)) return; await api(base + "/suspend", "POST", {}); load(); }) })),
+        el("button", { class: "danger", text: "Suspend", onclick: () => act(box, async () => { if (!confirm(`Suspend ${v.name || "this record"}? Their link stops working immediately, and any walks assigned to them reopen so you can assign two other adults.`)) return; await api(base + "/suspend", "POST", {}); load(); }) })),
         box));
   });
   return el("section", { class: "card" }, el("h2", { text: `Volunteers (${D.volunteers.length})` }),
@@ -112,8 +115,12 @@ function adminSection() {
     el("details", {}, el("summary", { text: "Add a coordinator" }), ...f("k-email", "Email (must be allowed by Cloudflare Access)", { type: "email" }),
       el("label", { class: "check" }, el("input", { type: "checkbox", id: "k-admin" }), el("span", { text: "Admin" })),
       el("button", { text: "Save", onclick: () => act(box, async () => { await api(`/api/c/${slug}/coordinators`, "POST", { email: v("k-email"), role: document.getElementById("k-admin").checked ? "admin" : "coordinator" }); note(box, true, "Saved."); }) })),
+    el("details", {}, el("summary", { text: "Remove a coordinator" }), ...f("r-email", "Email", { type: "email" }),
+      el("p", { class: "muted", text: "Another admin must remove or demote you; the last admin cannot be removed. Also remove them from the Cloudflare Access policy." }),
+      el("button", { class: "danger", text: "Remove", onclick: () => act(box, async () => { if (!confirm(`Remove ${v("r-email")} as a coordinator?`)) return;
+        await api(`/api/c/${slug}/coordinators/remove`, "POST", { email: v("r-email") }); note(box, true, "Removed."); }) })),
     el("div", { class: "row" }, el("button", { class: "secondary", text: "Verify audit log", onclick: () => act(box, async () => { const r = await api(`/api/c/${slug}/audit/verify`, "POST", {});
-      note(box, r.ok, `Audit chain ${r.ok ? "intact" : "BROKEN at " + r.broken_at} — ${r.entries} entries`); }) })), box);
+      note(box, r.ok, `Audit chain ${r.ok ? "intact" : "BROKEN — contact the maintainers"} — ${r.entries} entries for this program`); }) })), box);
 }
 
 async function load() {

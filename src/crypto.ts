@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Cryptographic primitives — WebCrypto only, no dependencies.
-// AES-256-GCM with a fresh 96-bit IV per value and Additional Authenticated Data binding each ciphertext to
-// (table, field, org). A ciphertext copied into another row/field/org fails to decrypt.
+// AES-256-GCM with a fresh 96-bit IV per value and Additional Authenticated Data (AAD) chosen by the caller. The Worker binds
+// every ciphertext to its table, field, org and row (walk id, or the volunteer's per-org phone HMAC), so a ciphertext
+// copied into another row, field or org fails to decrypt.
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Synthetic monitor — measures availability from outside, the only honest way to state an uptime number.
 // Usage:
 //   node scripts/monitor.mjs https://walk.example.org [org-slug] [--prom /path/textfile.prom] [--log /path/probes.jsonl]

@@ -66,9 +66,13 @@ npm run typecheck
 node scripts/monitor.mjs https://<your-host> <org-slug>   # external availability probe
 ```
 
-## License
+## License and ownership
 
-Code: [AGPL-3.0](LICENSE) — anyone may use, modify and host it; anyone who runs a modified version for others must publish their changes. Documentation: CC BY 4.0.
+Copyright (C) 2026 Savvy Solution Pros LLC, founded by Heriberto Collazo. See [`NOTICE`](NOTICE).
+
+- **Code:** [AGPL-3.0-only](LICENSE). Free forever: anyone may use, modify and host it, and anyone who runs a modified version for others must publish their changes. Nobody can turn it into a closed or paid product.
+- **Documentation:** CC BY 4.0.
+- **The name "Walk With Us":** only for programs that keep every safety guarantee (no child data, Rule of Two, in-person vetting, encrypted and auto-deleted numbers, no ads or trackers, free to families). See [`TRADEMARK.md`](TRADEMARK.md).
 
 ## Not an emergency service
 

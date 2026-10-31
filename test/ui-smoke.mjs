@@ -1,20 +1,29 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Browser smoke test: renders the family page in every language (light + dark, phone viewport) and the volunteer and
 // coordinator pages, against the real Worker. Fails on any JS error, any literal "null"/"undefined" in the page, a
 // missing 911 link, a wrong text direction, or reversed phone numbers in RTL languages.
 // Run: npm run test:ui   (Playwright is a pinned devDependency; first time: `npx playwright install --with-deps chromium`)
 import { spawn, execFileSync } from "node:child_process";
 import { randomBytes, generateKeyPairSync, sign } from "node:crypto";
-import { writeFileSync, openSync, rmSync, mkdirSync } from "node:fs";
+import { writeFileSync, openSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 
 process.env.CI = "1"; process.env.WRANGLER_SEND_METRICS = "false";
 const require = createRequire(import.meta.url);
-let chromium;
-try { ({ chromium } = require("playwright")); }
-catch { ({ chromium } = createRequire("/opt/node22/lib/node_modules/")("playwright")); }
-
-const P = ".wrangler/ui-smoke", PORT = 8803, B = `http://127.0.0.1:${PORT}`;
+// ENGINE selects the browser engine: chromium (default), webkit (Safari / every iOS browser) or firefox.
+const ENGINE = process.env.ENGINE || "chromium";
+let pw;
+try { pw = require("playwright"); }
+catch { pw = createRequire("/opt/node22/lib/node_modules/")("playwright"); }
+const chromium = pw[ENGINE];
+if (!chromium) throw new Error("unknown ENGINE " + ENGINE);
+// WebKit applies the CSP's upgrade-insecure-requests even to 127.0.0.1 (Chromium and Firefox exempt loopback), so the
+// WebKit run serves the app over local HTTPS, exactly as production does. The dev server's certificate is self-signed, so
+// only the Playwright contexts that talk to this loopback server accept it; Node's own TLS validation is never changed.
+const PROTO = ENGINE === "webkit" ? "https" : "http";
+const P = ".wrangler/ui-smoke", PORT = 8803, B = `${PROTO}://127.0.0.1:${PORT}`;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = publicKey.export({ format: "jwk" });
 rmSync(P, { recursive: true, force: true }); mkdirSync(".wrangler", { recursive: true });
@@ -28,11 +37,15 @@ execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--pe
    INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${win};
    INSERT INTO coordinators (email,org_id,role) VALUES ('lead@demo.test',1,'admin'), ('coord@demo.test',1,'coordinator');`], { stdio: "ignore" });
 const LOGFD = openSync(".wrangler/ui-smoke.log", "w");
-const proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", P, "--ip", "127.0.0.1"],
+const proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", P, "--ip", "127.0.0.1", "--local-protocol", PROTO],
   { stdio: ["ignore", LOGFD, LOGFD], detached: true });
 const stop = () => { try { process.kill(-proc.pid, "SIGTERM"); } catch {} rmSync(".dev.vars", { force: true }); };
 process.on("exit", stop);
-for (let i = 0; i < 90; i++) { try { if ((await fetch(B + "/api/health")).ok) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
+{ // wait for the dev server through a Playwright request context scoped to this loopback origin
+  const probe = await pw.request.newContext({ baseURL: B, ignoreHTTPSErrors: PROTO === "https" });
+  for (let i = 0; i < 90; i++) { try { if ((await probe.get("/api/health")).ok()) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
+  await probe.dispose();
+}
 
 const b64u = (x) => Buffer.from(x).toString("base64url");
 const tok = (email) => { const h = b64u(JSON.stringify({ alg: "RS256", kid: "k" })), p = b64u(JSON.stringify({ iss: "https://t.cloudflareaccess.com", aud: ["a"], email, exp: Math.floor(Date.now() / 1000) + 3600 }));
@@ -40,6 +53,7 @@ const tok = (email) => { const h = b64u(JSON.stringify({ alg: "RS256", kid: "k" 
 
 const { META } = await import(new URL("../public/js/strings.js", import.meta.url));
 const browser = await chromium.launch();
+{ const nc = browser.newContext.bind(browser); browser.newContext = (o = {}) => nc({ ...o, ignoreHTTPSErrors: PROTO === "https" }); }
 const failures = [];
 async function check(label, ctxOpts, url, assertions) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, ...ctxOpts.ctx });
@@ -66,9 +80,11 @@ for (const [code, m] of Object.entries(META)) for (const scheme of ["light", "da
     assert.ok(/1-800-577-TIPS/.test(text), "tips number in logical order");
     // Each emergency button must read as one phrase with its spaces intact ("Call 911", not "Call911").
     for (const id of ["sos911", "sostips", "soscrisis"]) {
-      const t = await pg.$eval("#" + id, (n) => n.innerText);
-      const before = (/(.)\u2066/.exec(t) || [])[1];  // character just before the isolated number
-      assert.ok(!/\n/.test(t) && before !== undefined && /[\s\uFF1A]/.test(before), `${id} lost the space before its number: ${JSON.stringify(t)}`);
+      const t = (await pg.$eval("#" + id, (n) => n.innerText)).trim();   // WebKit appends a trailing line break
+      // Engines differ in whether innerText keeps bidi isolates (Firefox drops them), so strip them and look at the
+      // character right before the first digit: a space, a full-width colon (Chinese), or nothing (number first).
+      const plain = t.replace(/[\u2066-\u2069]/g, ""), at = plain.search(/[0-9]/), before = at > 0 ? plain[at - 1] : "";
+      assert.ok(!/\n/.test(t) && at >= 0 && (before === "" || /[\s\uFF1A]/.test(before)), `${id} lost the space before its number: ${JSON.stringify(t)}`);
     }
     assert.equal((await pg.$$(".corner")).length, 2);
     assert.ok((await pg.$$("#w-lang option")).length >= 14, "call languages");
@@ -95,6 +111,28 @@ for (const [code, dir] of [["en", "ltr"], ["es", "ltr"], ["ar", "rtl"]]) {
     assert.ok(await pg.$('a[href="tel:911"]'), "911 link");
     assert.ok(await pg.isVisible('#content [role="status"]'), "no-program-yet notice");
   });
+}
+// Accessibility (WCAG 2.2 AA + best practice) with axe-core, and reflow at 320 CSS px (WCAG 1.4.10), light and dark, LTR and RTL.
+{
+  const AXE = readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
+  for (const [page, path, ready] of [["home", "/", "#hh"], ["family", "/?o=demo", "#wh"], ["volunteer", "/v.html", "h1"], ["privacy", "/privacy", "h1"]])
+    for (const scheme of ["light", "dark"]) for (const lang of ["en", "ar"]) {
+      const label = `a11y ${page} ${lang} ${scheme}`;
+      // bypassCSP only lets the test inject axe; the page itself runs under its real CSP.
+      const ctx = await browser.newContext({ viewport: { width: 320, height: 700 }, colorScheme: scheme, bypassCSP: true });
+      await ctx.addInitScript((x) => { try { localStorage.setItem("wwu.lang", x); } catch {} }, lang);
+      const pg = await ctx.newPage();
+      try {
+        await pg.goto(B + path); await pg.waitForSelector(ready, { timeout: 15000 });
+        assert.ok(await pg.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "horizontal scroll at 320 px");
+        await pg.addScriptTag({ content: AXE });
+        const v = await pg.evaluate(async () => (await axe.run(document, { runOnly: { type: "tag",
+          values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"] } })).violations.map((x) => `${x.id}(${x.nodes.length})`));
+        assert.deepEqual(v, [], "axe violations");
+        console.log("ok  ", label);
+      } catch (e) { failures.push(label); console.log("FAIL", label, "—", e.message.split("\n")[0]); }
+      await ctx.close();
+    }
 }
 // Now add a real program that has no approved adults yet (inserted while the server runs, after the home-page checks).
 execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--persist-to", P, "--command",
@@ -144,7 +182,10 @@ await (async () => {
   await ctx.close();
 })();
 // Offline: after one visit, the shell, the 911 link and the last schedule still render with no network.
-await (async () => {
+// Runs on Chromium only: Playwright's offline emulation with an active service worker fails inside its own WebKit build
+// ("internal error") and times out in Firefox, so on those engines it would test the harness, not the app.
+if (ENGINE !== "chromium") console.log("skip offline after first visit (offline emulation with service workers is Chromium-only in Playwright)");
+else await (async () => {
   const label = "offline after first visit";
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const pg = await ctx.newPage();
@@ -162,5 +203,5 @@ await (async () => {
 })();
 await browser.close();
 stop();
-console.log(failures.length ? `\n${failures.length} FAILED` : "\nALL UI CHECKS PASSED");
+console.log(failures.length ? `\n${failures.length} FAILED (${ENGINE})` : `\nALL UI CHECKS PASSED (${ENGINE})`);
 process.exit(failures.length ? 1 : 0);

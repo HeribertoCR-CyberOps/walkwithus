@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
+-- Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 -- v1.1 hardening.
 -- 1) Call-language set widened to NYC Local Law 30 designated citywide languages + West African languages common in
 --    the Bronx (Twi/Akan, Wolof, Fula). SQLite cannot alter a CHECK, so walk_requests is rebuilt in place.

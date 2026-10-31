@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.1.7 — 2026-10-31
+**Security hardening from an independent audit, accessibility verification in CI, ownership and naming policy.** Full findings table: `docs/AUDIT.md` → "Independent review — v1.1.7".
+- **Rate limits** are keyed on the client network (IPv4 address or IPv6 /64), closing a bypass where one household's /64 could flood a program. Refused requests no longer cost a database write.
+- **Key rotation** walks every row with a persistent cursor and reports done only after a clean full sweep (`checks.rekey_pending`). Before, it only ever re-sealed the first 300 rows. Rows no key can open raise `rekey_unreadable_rows` instead of failing silently.
+- **Volunteer encryption is bound to the row** (AAD includes the per-org phone HMAC). Existing records are upgraded automatically by maintenance.
+- **Suspension reopens the person's upcoming walks**, so a coordinator must assign two other adults. Rule of Two can no longer be silently broken.
+- **Approving volunteers and issuing check-in links are admin-only.** No one can change their own access, the last admin cannot be removed, and there is a new remove-coordinator action. The audit records who was changed (keyed hash) and the exact role transition. Coordinator dashboard views are audited.
+- **Privacy:**
+  - The public health probe shows pass/fail only, no activity counts.
+  - Workers invocation logs are off, so client IPs aren't stored next to requests.
+  - New and duplicate volunteer applications take identical work, so timing no longer reveals who already applied.
+- **Correctness:**
+  - Cross-org corner deactivation is refused (404) instead of writing a false audit entry.
+  - Oversized bodies are refused before being read.
+  - An unknown Access signing key triggers one key refresh instead of an hour-long lockout.
+- **Self-diagnosis:**
+  - The probe reports `turnstile_secret_set_but_ui_not_wired`, catching the one setting that would break both public forms.
+  - New `scripts/incident.mjs`: the monitor workflow confirms failures on a retry, opens or updates one "incident" issue with a specific next step per failing probe, and closes it on recovery.
+- **Accessibility:**
+  - axe-core (WCAG 2.2 AA + best practice) and 320 px reflow checks run in CI on 4 pages × light/dark × English/Arabic.
+  - Fixed a reflow failure on the home page at 320 px.
+  - The browser suite runs on Chromium (required check) and WebKit (Safari, every iOS browser; new CI job). Firefox passed every accessibility scan against production; its local test run is not yet stable against the dev server (timeouts while loading), so it is not claimed in CI.
+- **Ownership and licensing:**
+  - New `NOTICE` (copyright Savvy Solution Pros LLC; code AGPL-3.0-only, free forever; docs CC BY 4.0).
+  - New `TRADEMARK.md`: the name "Walk With Us" may be used only by programs that keep every safety guarantee.
+  - SPDX license headers on every source file.
+- Docs corrected where the audit found them overstating the code (row-bound encryption, Turnstile readiness, per-network limits).
+- Tests: 29 end-to-end tests (including IPv6 /64, refused-request writes, suspension, coordinator management, cross-org corner, a rotation cursor in batches of 2 with legacy-row upgrade), 12 property tests, and the full browser suite with 16 accessibility scans.
+
 ## 1.1.6 — 2026-10-31
 **Anti-spam and readiness: nothing is accepted unless a real, connected program stands behind it.**
 - **Readiness gate.** A program takes walk requests only when it has at least one coordinator to call families back **and** at least two approved adults (Rule of Two). Until then the API answers `409 program_not_ready` and the family page replaces the form with "This program isn't taking walk requests yet. In danger, call 911.", plus the organization's phone. Volunteer applications stay open. The public page updates the moment a volunteer is approved or suspended or a coordinator is added (edge cache invalidated). Readiness is re-checked inside the `INSERT`, so a suspension racing a request cannot slip a row through.

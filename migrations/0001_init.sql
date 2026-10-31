@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
+-- Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 -- Walk With Us — schema v1.
 -- PRIVACY WALL (structural, not policy): there is no column anywhere for a child's name, a child's location,
 -- a child's school record, or free text. Meeting points are rows in `corners` (public places chosen by the org).

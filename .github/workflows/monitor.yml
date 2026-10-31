@@ -1,5 +1,6 @@
-# External availability probe for the reference deployment. GitHub schedules can be delayed by several minutes, so this
-# is a second opinion; primary monitoring is a 60-second probe from operator infrastructure (docs/SLO.md).
+# External health probe with an incident loop (scripts/incident.mjs): diagnose → confirm on retry → recommend → open/update one
+# "incident" issue → close it automatically on recovery. GitHub schedules can be delayed, so this is a second opinion;
+# primary monitoring is a 60-second probe from operator infrastructure (docs/SLO.md).
 # Repository variables: MONITOR_URL (e.g. https://walk.example.org) and MONITOR_ORG (an org slug). Unset = job skipped.
 name: monitor
 on:
@@ -12,10 +13,15 @@ jobs:
     if: ${{ vars.MONITOR_URL != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
-    permissions: { contents: read }
+    permissions: { contents: read, issues: write }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22 }
-      - run: node scripts/monitor.mjs "${{ vars.MONITOR_URL }}" "${{ vars.MONITOR_ORG }}"
+      - name: Probe, triage and manage the incident issue
+        run: node scripts/incident.mjs "$MONITOR_URL" "$MONITOR_ORG"
+        env:
+          MONITOR_URL: ${{ vars.MONITOR_URL }}
+          MONITOR_ORG: ${{ vars.MONITOR_ORG }}
+          GH_TOKEN: ${{ github.token }}

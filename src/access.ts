@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 // Cloudflare Access JWT verification (RS256) — identity for coordinators. No cookie trust, no session store.
 // Keys come from https://<team>/cdn-cgi/access/certs (cached 1h). ACCESS_JWKS_JSON may supply keys for local tests;
 // it never bypasses verification — a token must still be signed by a key in that set and carry iss/aud/exp.
@@ -7,9 +9,10 @@ export interface Identity { email: string; sub: string; }
 
 interface Jwk { kid: string; kty: string; n: string; e: string; alg?: string; }
 let cache: { at: number; team: string; keys: Map<string, CryptoKey> } | null = null;
+let lastForced = 0;   // when Access rotates its signing key, refetch at most once a minute on an unknown kid
 
-async function keysFor(team: string, override?: string): Promise<Map<string, CryptoKey>> {
-  if (cache && cache.team === team && Date.now() - cache.at < 3_600_000) return cache.keys;
+async function keysFor(team: string, override?: string, force = false): Promise<Map<string, CryptoKey>> {
+  if (!force && cache && cache.team === team && Date.now() - cache.at < 3_600_000) return cache.keys;
   let jwks: { keys: Jwk[] };
   if (override) jwks = JSON.parse(override);
   else {
@@ -39,7 +42,11 @@ export async function verifyAccess(req: Request, team: string, aud: string, over
     payload = JSON.parse(new TextDecoder().decode(unb64url(p)));
   } catch { return null; }
   if (header.alg !== "RS256" || !header.kid) return null;              // no alg confusion, no "none"
-  const key = (await keysFor(team, override)).get(header.kid);
+  let key = (await keysFor(team, override)).get(header.kid);
+  if (!key && !override && Date.now() - lastForced > 60_000) {
+    lastForced = Date.now();
+    key = (await keysFor(team, override, true)).get(header.kid);   // signature still verified below; this only refreshes keys
+  }
   if (!key) return null;
   const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, unb64url(s), new TextEncoder().encode(`${h}.${p}`));
   if (!ok) return null;
