@@ -12,6 +12,26 @@ let D = null;
 function note(box, ok, ...n) { box.className = "result " + (ok ? "ok" : "err"); box.replaceChildren(...n); }
 async function act(box, fn) { try { await fn(); } catch (e) { note(box, false, "Error: " + e.message); } }
 
+// Program status: is the public walk form open, and how close is today's traffic to the daily ceilings?
+function statusSection() {
+  const r = D.readiness, t = D.today;
+  if (!r || !t) return null;
+  const items = [];
+  if (D.org.demo) items.push(el("p", { class: "result ok", role: "status", text: "Demo program: the public forms work, but nothing families or volunteers submit is saved." }));
+  else if (r.accepting_walks) items.push(el("p", { class: "result ok", role: "status",
+    text: `Taking walk requests: ${r.coordinators} coordinator${r.coordinators === 1 ? "" : "s"}, ${r.approved_adults} approved adults.` }));
+  else {
+    const need = [];
+    if (r.coordinators < 1) need.push("at least one coordinator");
+    if (r.approved_adults < r.min_approved_adults) need.push(`${r.min_approved_adults - r.approved_adults} more approved adult${r.min_approved_adults - r.approved_adults === 1 ? "" : "s"}`);
+    items.push(el("p", { class: "result err", role: "status",
+      text: `Not taking walk requests yet. Families see "not taking requests yet" and 911. Needed: ${need.join(" and ")}.` }));
+  }
+  const bar = (label, n, cap, near) => el("div", { class: near ? "result err" : "muted", text: `${label} today: ${n} of ${cap}${near ? " (near the daily limit; beyond it, families are asked to call the organization)" : ""}` });
+  items.push(bar("Walk requests", t.walks, t.walk_cap, t.walks_near_cap), bar("Volunteer applications", t.applications, t.apply_cap, t.applications_near_cap));
+  return el("section", { class: "card", "aria-labelledby": "st" }, el("h2", { id: "st", text: "Program status" }), ...items);
+}
+
 function cornersSection() {
   return el("section", { class: "card" }, el("h2", { text: "Corners right now" }),
     el("p", { class: "muted", text: "Covered = 2 or more adults checked in (Rule of Two)." }),
@@ -23,7 +43,7 @@ function cornersSection() {
 }
 
 function walksSection() {
-  const approved = D.volunteers.filter((v) => v.status === "approved");
+  const approved = D.volunteers.filter((v) => v.status === "approved" && !v.unreadable);   // unreadable records are never assignable
   const name = (id) => approved.find((v) => v.id === id)?.name || `#${id}`;
   const rows = D.walks.map((w) => {
     const box = el("div", { "aria-live": "polite" });
@@ -55,14 +75,14 @@ function volunteersSection() {
     const base = `/api/c/${slug}/volunteers/${v.id}`;
     const onShift = D.on_shift.find((s) => s.volunteer_id === v.id);
     return el("tr", {},
-      el("td", {}, el("strong", { text: v.name }), el("div", { class: "muted", text: v.phone_masked }),
+      el("td", {}, el("strong", { text: v.unreadable ? "Unreadable record — tell the maintainers" : v.name }), el("div", { class: "muted", text: v.phone_masked || "" }),
         onShift ? el("span", { class: "badge ok", text: "on shift" }) : null),
       el("td", {}, el("span", { class: "badge " + (v.status === "approved" ? "ok" : "warn"), text: v.status })),
       el("td", {}, el("div", { class: "row" },
         el("button", { class: "secondary", text: "Phone", onclick: () => act(box, async () => { const r = await api(base + "/reveal", "POST", {});
           note(box, true, el("a", { href: "tel:" + r.phone, text: r.phone }), el("small", { class: "muted", text: " (logged)" })); }) }),
         el("button", { text: v.status === "approved" ? "New link" : "Approve (met in person)", onclick: () => act(box, async () => {
-          if (v.status !== "approved" && !confirm(`Approve ${v.name}? Only approve someone you have met in person and briefed.`)) return;
+          if (v.status !== "approved" && !confirm(`Approve ${v.name || "this record"}? Only approve someone you have met in person and briefed.`)) return;
           const r = await api(base + "/approve", "POST", {});
           note(box, true, el("div", { text: "Check-in link (shown once — give it in person or by Signal):" }), el("div", { class: "mono", text: r.checkin_link }),
             el("button", { class: "secondary", text: "Copy", onclick: async () => { try { await navigator.clipboard.writeText(r.checkin_link); } catch {} } }));
@@ -107,7 +127,7 @@ async function load() {
     }
     D = await api(`/api/c/${slug}/dashboard`);
     document.getElementById("who").textContent = `${D.you.email} · ${D.you.role} · ${D.org.name}`;
-    content.replaceChildren(...[cornersSection(), walksSection(), volunteersSection(), adminSection()].filter(Boolean));
+    content.replaceChildren(...[statusSection(), cornersSection(), walksSection(), volunteersSection(), adminSection()].filter(Boolean));
   } catch (e) {
     content.replaceChildren(el("p", { class: "result err", text: e.message === "access_required" ? "Sign in through your organization's Cloudflare Access link." : e.message === "not_a_coordinator_for_org" ? "Your account is not a coordinator for this program." : "Error: " + e.message }));
   }

@@ -104,7 +104,18 @@ before(async () => {
          (1,1,0,0,1440),(1,1,1,0,1440),(1,1,2,0,1440),(1,1,3,0,1440),(1,1,4,0,1440),(1,1,5,0,1440),(1,1,6,0,1440),
          (1,2,1,450,525);
        INSERT INTO coordinators (email, org_id, role) VALUES ('admin@org.test',1,'admin'), ('coord@org.test',1,'coordinator'),
-         ('other@org.test',2,'admin'), ('bulk@org.test',1,'coordinator'), ('rot@org.test',1,'admin');`);
+         ('other@org.test',2,'admin'), ('bulk@org.test',1,'coordinator'), ('rot@org.test',1,'admin');
+       -- 3: two approved adults but NO coordinator; 4: demo program; 5: ready program used for the daily ceilings
+       INSERT INTO orgs (id, slug, name, demo) VALUES (3,'no-coord','No Coordinator Org',0), (4,'demo-test','Demo Test',1), (5,'cap-test','Ceiling Test',0);
+       INSERT INTO corners (id, org_id, label, cross_streets, lat, lon) VALUES (4,3,'NC corner','a b',40.8,-73.9), (5,4,'Demo corner','a b',40.8,-73.9), (6,5,'Cap corner','a b',40.8,-73.9);
+       INSERT INTO windows (org_id, corner_id, dow, start_min, end_min) VALUES
+         (3,4,0,0,1440),(3,4,1,0,1440),(3,4,2,0,1440),(3,4,3,0,1440),(3,4,4,0,1440),(3,4,5,0,1440),(3,4,6,0,1440),
+         (4,5,0,0,1440),(4,5,1,0,1440),(4,5,2,0,1440),(4,5,3,0,1440),(4,5,4,0,1440),(4,5,5,0,1440),(4,5,6,0,1440),
+         (5,6,0,0,1440),(5,6,1,0,1440),(5,6,2,0,1440),(5,6,3,0,1440),(5,6,4,0,1440),(5,6,5,0,1440),(5,6,6,0,1440);
+       INSERT INTO coordinators (email, org_id, role) VALUES ('cap@org.test',5,'admin');
+       INSERT INTO volunteers (org_id, name_enc, phone_enc, phone_hmac, status, token_hash, briefing_ack, approved_by) VALUES
+         (3,'x','x','nc1','approved','tnc1',1,'seed'), (3,'x','x','nc2','approved','tnc2',1,'seed'),
+         (5,'x','x','cp1','approved','tcp1',1,'seed'), (5,'x','x','cp2','approved','tcp2',1,'seed');`);
   await startServer();
 });
 after(async () => {
@@ -140,6 +151,85 @@ test("unknown org → 404; malformed slug → 404", async () => {
 });
 
 // ---------------------------------------------------------------- walk requests: the privacy wall
+// ---------------------------------------------------------------- readiness gate, demo mode, daily ceilings
+const walkBody = (corner_id, time = "10:00", cb = "718-555-0" + String(100 + Math.floor(Math.random() * 899))) =>
+  ({ corner_id, date: nyDate(1), time, callback: cb, consent: true });
+let seed1, seed2;
+test("readiness gate: no walk requests until a coordinator AND two approved adults exist; public page says so", async () => {
+  // crotona-test has coordinators but no approved adults yet
+  let pub = await req("/api/o/crotona-test");
+  assert.equal(pub.j.accepting_walks, false);
+  let r = await req("/api/o/crotona-test/walk", { method: "POST", body: walkBody(1) });
+  assert.deepEqual([r.status, r.j.error], [409, "program_not_ready"]);
+  // no-coord has two approved adults but nobody to call families back
+  r = await req("/api/o/no-coord/walk", { method: "POST", body: walkBody(4) });
+  assert.deepEqual([r.status, r.j.error], [409, "program_not_ready"]);
+  assert.equal(sql("SELECT COUNT(*) n FROM walk_requests")[0].n, 0, "nothing stored while not ready");
+  // two adults apply and are approved through the real API -> ready, and the public page updates at once (cache invalidated)
+  const ap = (name, phone) => req("/api/o/crotona-test/volunteer", { method: "POST", body: { name, phone, corners: [1], briefing_ack: true } });
+  assert.equal((await ap("Seed One", "917-555-0181")).status, 202);
+  assert.equal((await ap("Seed Two", "917-555-0182")).status, 202);
+  [seed1, seed2] = sql("SELECT id FROM volunteers WHERE org_id=1 ORDER BY id").map((x) => x.id);
+  await req(`/api/c/crotona-test/volunteers/${seed1}/approve`, { method: "POST", token: COORD(), body: {} });
+  pub = await req("/api/o/crotona-test");
+  assert.equal(pub.j.accepting_walks, false, "one adult is not enough (Rule of Two)");
+  await req(`/api/c/crotona-test/volunteers/${seed2}/approve`, { method: "POST", token: COORD(), body: {} });
+  pub = await req("/api/o/crotona-test");
+  assert.equal(pub.j.accepting_walks, true);
+  const d = await req("/api/c/crotona-test/dashboard", { token: COORD() });
+  assert.deepEqual({ ...d.j.readiness }, { coordinators: 4, approved_adults: 2, min_approved_adults: 2, accepting_walks: true });
+});
+
+test("demo program: forms validate exactly like a real program but nothing is ever stored", async () => {
+  const before = sql("SELECT (SELECT COUNT(*) FROM walk_requests) w, (SELECT COUNT(*) FROM volunteers) v, (SELECT COUNT(*) FROM audit) a")[0];
+  const pub = await req("/api/o/demo-test");
+  assert.equal(pub.j.org.demo, true); assert.equal(pub.j.accepting_walks, true);
+  const w = await req("/api/o/demo-test/walk", { method: "POST", body: walkBody(5) });
+  assert.equal(w.status, 201); assert.equal(w.j.demo, true); assert.match(w.j.ref, /^[2-9A-HJKMNP-TV-Z]{6}$/);
+  assert.equal((await req("/api/o/demo-test/walk", { method: "POST", body: { ...walkBody(5), consent: false } })).j.error, "consent_required");
+  assert.equal((await req("/api/o/demo-test/walk", { method: "POST", body: { ...walkBody(5), lat: 1 } })).status, 400);
+  const v = await req("/api/o/demo-test/volunteer", { method: "POST", body: { name: "Demo Person", phone: "917-555-0190", briefing_ack: true } });
+  assert.equal(v.status, 202); assert.equal(v.j.demo, true);
+  const after = sql("SELECT (SELECT COUNT(*) FROM walk_requests) w, (SELECT COUNT(*) FROM volunteers) v, (SELECT COUNT(*) FROM audit) a")[0];
+  assert.deepEqual(after, before, "no rows and no audit entries from the demo");
+  const orgs = (await req("/api/orgs")).j.orgs;
+  assert.equal(orgs.find((o) => o.slug === "demo-test").demo, 1);
+  assert.equal(orgs.find((o) => o.slug === "crotona-test").demo, 0);
+});
+
+test("daily ceilings: per program per NY day, counted from stored rows, enforced atomically in the INSERT", async () => {
+  // fill cap-test to one below its walk ceiling (default 100) with rows created today
+  sql(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 99)
+       INSERT INTO walk_requests (id, ref, org_id, corner_id, slot_start, callback_enc, callback_hmac, lang, expires_at)
+       SELECT printf('cap%023d', i), printf('C%05d', i), 5, 6, (unixepoch()/900+200)*900, 'v1.x', 'h'||i, 'en', unixepoch()+999999 FROM n`);
+  let r = await req("/api/o/cap-test/walk", { method: "POST", body: walkBody(6) });
+  assert.equal(r.status, 201, "the 100th request of the day is accepted");
+  let d = await req("/api/c/cap-test/dashboard", { token: jwt({ email: "cap@org.test" }) });
+  assert.deepEqual([d.j.today.walks, d.j.today.walk_cap, d.j.today.walks_near_cap], [100, 100, true]);
+  r = await req("/api/o/cap-test/walk", { method: "POST", body: walkBody(6) });
+  assert.deepEqual([r.status, r.j.error], [429, "program_daily_limit"], "the 101st is refused");
+  // concurrency: a burst at the ceiling cannot overshoot it
+  const burst = await Promise.all(Array.from({ length: 8 }, () => req("/api/o/cap-test/walk", { method: "POST", body: walkBody(6) })));
+  assert.ok(burst.every((x) => x.status === 429));
+  assert.equal(sql("SELECT COUNT(*) n FROM walk_requests WHERE org_id=5")[0].n, 100);
+  // applications ceiling (default 50): 2 seeded approved adults + 47 rows today = 49, so the 50th is accepted, the 51st refused
+  sql(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 47)
+       INSERT INTO volunteers (org_id, name_enc, phone_enc, phone_hmac, briefing_ack) SELECT 5, 'x', 'x', 'capv'||i, 1 FROM n`);
+  r = await req("/api/o/cap-test/volunteer", { method: "POST", body: { name: "Fiftieth Person", phone: "917-555-0150", briefing_ack: true } });
+  assert.equal(r.status, 202);
+  r = await req("/api/o/cap-test/volunteer", { method: "POST", body: { name: "Over Limit", phone: "917-555-0151", briefing_ack: true } });
+  assert.deepEqual([r.status, r.j.error], [429, "program_daily_limit"]);
+  d = await req("/api/c/cap-test/dashboard", { token: jwt({ email: "cap@org.test" }) });
+  assert.deepEqual([d.j.today.applications, d.j.today.applications_near_cap], [50, true]);
+  // the seeded rows are deliberately not real ciphertext: the dashboard must survive them and say so
+  assert.ok(d.j.unreadable_records >= 2);
+  assert.ok(d.j.volunteers.some((v) => v.unreadable === true && v.name === null && v.phone_masked === null));
+  // other programs are unaffected by cap-test's ceiling
+  assert.equal((await req("/api/o/crotona-test/walk", { method: "POST", body: walkBody(1, "11:00") })).status, 201);
+  // remove the fake (non-ciphertext) seed rows so the key-rotation drill below sees only real data
+  sql(`DELETE FROM walk_requests WHERE id LIKE 'cap%'; DELETE FROM volunteers WHERE name_enc='x';`);
+});
+
 test("walk request: strict schema rejects any location/child field", async () => {
   for (const extra of [{ lat: 40.8, lon: -73.9 }, { child_name: "x" }, { school: "09X001" }, { note: "free text" }]) {
     const r = await req("/api/o/crotona-test/walk", { method: "POST",
@@ -215,7 +305,7 @@ test("volunteer apply → pending, encrypted, duplicate phone gives identical re
   assert.equal((await mk("Cara Diaz", "917-555-0103")).status, 202);
   const dup = await mk("Someone Else", "917-555-0101");
   assert.equal(dup.status, 202);
-  const rows = sql("SELECT id, name_enc, phone_enc, status FROM volunteers WHERE org_id=1 ORDER BY id");
+  const rows = sql(`SELECT id, name_enc, phone_enc, status FROM volunteers WHERE org_id=1 AND id NOT IN (${seed1},${seed2}) ORDER BY id`);
   assert.equal(rows.length, 3);
   for (const r of rows) { assert.equal(r.status, "pending"); assert.ok(!/Ana|Ben|Cara|555/.test(r.name_enc + r.phone_enc)); }
   [v1, v2, v3] = rows.map((r) => r.id);
@@ -240,7 +330,7 @@ test("Access JWT: missing/forged/wrong-aud/expired/alg-none/unknown-kid/other-or
 
 test("dashboard decrypts names for coordinators but masks phones; callback never in dashboard", async () => {
   const r = await req("/api/c/crotona-test/dashboard", { token: COORD() });
-  const names = r.j.volunteers.map((v) => v.name).sort();
+  const names = r.j.volunteers.map((v) => v.name).filter((n) => !n.startsWith("Seed")).sort();
   assert.deepEqual(names, ["Ana Rivera", "Ben Osei", "Cara Diaz"]);
   for (const v of r.j.volunteers) assert.match(v.phone_masked, /^•••-•••-\d{4}$/);
   assert.ok(!JSON.stringify(r.j).includes("5550199"));
@@ -349,6 +439,9 @@ test("readiness probe reports maintenance and audit status without personal data
   assert.equal(r.j.checks.keys, true);
   assert.equal(r.j.checks.purge.ok, true, "cron purge ran in the previous test and recorded success");
   assert.equal(r.j.checks.audit_verify.result.ok, true);
+  // programs: crotona-test, other-org, no-coord, demo-test, cap-test. Accepting = crotona-test only: cap-test's seeded adults
+  // were removed after the ceiling test, other-org has none, no-coord has no coordinator, and demo is never counted.
+  assert.deepEqual(r.j.checks.programs, { total: 5, demo: 1, accepting_walks: 1 });
   assert.ok(!/5550|Rivera|Osei|Diaz|@/.test(JSON.stringify(r.j)), "no personal data or emails in health");
 });
 

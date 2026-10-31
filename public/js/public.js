@@ -68,6 +68,14 @@ function cornersCard() {
   return card;
 }
 
+// Shown instead of the walk form when the program has no coordinator or fewer than two approved adults yet.
+function notReadyCard() {
+  const ph = state.org && state.org.public_phone;
+  return el("section", { class: "card", "aria-labelledby": "wh" }, el("h2", { id: "wh", text: T().walk_h }),
+    el("p", { class: "result err", role: "status", text: T().not_ready }),
+    ph ? el("p", {}, el("a", { href: "tel:" + ph.replace(/[^\d+]/g, ""), dir: "ltr", text: ph })) : null);
+}
+
 function walkCard() {
   const box = el("div", { tabindex: "-1", "aria-live": "polite" });
   const cornerSel = el("select", { id: "w-corner", required: true }, ...state.corners.map((c) => el("option", { value: c.id, text: c.label })));
@@ -112,8 +120,9 @@ function walkCard() {
       const r = await api(`/api/o/${encodeURIComponent(state.org.slug)}/walk`, "POST",
         { corner_id: Number(cornerSel.value), date: date.value, time: time.value, callback: cb.value, lang: lg.value, consent: true });
       const del = new Date(r.deletes_at * 1000).toLocaleString(L, { timeZone: "America/New_York" });
-      result(box, true, el("p", { text: T().sent }), el("p", { class: "ref", dir: "ltr", text: r.ref }), el("p", { text: r.meeting_point }),
-        el("p", { class: "muted", text: `${T().deletes} ${del}` }), el("p", { text: T().next }));
+      result(box, true, r.demo ? el("p", { class: "demo-note", text: T().demo_saved }) : null,
+        el("p", { text: T().sent }), el("p", { class: "ref", dir: "ltr", text: r.ref }), el("p", { text: r.meeting_point }),
+        r.demo ? null : el("p", { class: "muted", text: `${T().deletes} ${del}` }), el("p", { text: T().next }));
       form.reset(); date.value = today(); fillTimes(true);
     } catch (err) {
       // Server or network failure (not a validation error): give the family a human fallback right away.
@@ -146,9 +155,9 @@ function volunteerCard() {
     if (!form.checkValidity()) { result(box, false, T().required); return; }
     btn.disabled = true;
     try {
-      await api(`/api/o/${encodeURIComponent(state.org.slug)}/volunteer`, "POST", { name: name.value, phone: ph.value,
+      const r = await api(`/api/o/${encodeURIComponent(state.org.slug)}/volunteer`, "POST", { name: name.value, phone: ph.value,
         corners: prefs.filter((p) => p.checked).map((p) => Number(p.value)), briefing_ack: true });
-      result(box, true, T().applied); form.reset();
+      result(box, true, r.demo ? el("p", { class: "demo-note", text: T().demo_saved }) : null, T().applied); form.reset();
     } catch (err) { result(box, false, errText(err)); }
     btn.disabled = false;
   });
@@ -191,19 +200,20 @@ async function render() {
     if (!slug) {
       const { orgs } = await api("/api/orgs");
       // The demo is never a destination on its own: a family landing here must not mistake made-up corners for a real program.
-      const real = orgs.filter((o) => o.slug !== "demo"), demo = orgs.some((o) => o.slug === "demo");
+      const isDemo = (o) => !!o.demo || o.slug === "demo";
+      const real = orgs.filter((o) => !isDemo(o)), demo = orgs.some(isDemo);
       if (real.length === 1) { location.replace(`?o=${encodeURIComponent(real[0].slug)}`); return; }
       content.replaceChildren(home(real, demo), rightsCard(), privacyCard());
       return;
     }
     if (!state.org || state.org.slug !== slug) {
       const d = await api(`/api/o/${encodeURIComponent(slug)}`);
-      state = { org: d.org, corners: d.corners, windows: d.windows, stale: d._cache === "stale" };
+      state = { org: d.org, corners: d.corners, windows: d.windows, stale: d._cache === "stale", accepting: d.accepting_walks !== false };
     }
     document.getElementById("title").textContent = state.org.name;
     document.title = state.org.name;
     content.replaceChildren(...[state.stale ? el("p", { class: "result err", text: T().stale }) : null,
-      cornersCard(), state.corners.length ? walkCard() : null, volunteerCard(), rightsCard(), privacyCard()].filter(Boolean));
+      cornersCard(), state.corners.length ? (state.accepting ? walkCard() : notReadyCard()) : null, volunteerCard(), rightsCard(), privacyCard()].filter(Boolean));
   } catch (err) {
     content.replaceChildren(el("p", { class: "result err", text: errText(err) }));
   }
