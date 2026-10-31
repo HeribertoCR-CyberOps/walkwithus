@@ -1,8 +1,8 @@
 # Tester guide — pilot round 1
 
-**This is a test site with made-up data.** Do not enter a real child's details, a real address, or your real phone number. Use numbers like `(718) 555-01xx`. Everything you enter is deleted automatically within 72 hours.
+**This is a test site with made-up data.** Do not enter a real child's details, a real address, or your real phone number. Use numbers like `(718) 555-01xx`. Walk requests delete themselves 72 hours after the walk time; the founder clears the demo after testing.
 
-Test site: `https://<TEST-HOST>/?o=demo` (the founder sends you the real link)
+Test site: `https://walk.savvysolutionpros.com/?o=demo` (demo program, made-up data)
 Report problems to: the founder, by email, with a screenshot, the time, your phone model, and the language you had selected.
 
 ## Who needs an account
@@ -13,7 +13,7 @@ Report problems to: the founder, by email, with a screenshot, the time, your pho
 | Volunteer | No | Apply on the site. A coordinator approves you and gives you a private check-in link. |
 | Coordinator / admin | Yes | The founder adds your email. You sign in with a one-time code sent to that email. |
 
-Coordinator pages are `https://<TEST-HOST>/c.html?o=demo`. If you see "Sign in through your organization's Cloudflare Access link", your email has not been added yet.
+Coordinator pages are `https://walk.savvysolutionpros.com/c.html?o=demo`. If you see "Sign in through your organization's Cloudflare Access link", your email has not been added yet.
 
 ## Round 1 testers
 
