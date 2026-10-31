@@ -10,7 +10,7 @@ Report problems to: the founder, by email, with a screenshot, the time, your pho
 | Role | Account? | How you get in |
 |---|---|---|
 | Family | No | Open the link. |
-| Volunteer | No | Apply on the site. A coordinator approves you and gives you a private check-in link. |
+| Volunteer | No | Apply on the site. An admin of the program approves you (after meeting you in person) and gives you a private check-in link. |
 | Coordinator / admin | Yes | The founder adds your email. You sign in with a one-time code sent to that email. |
 
 Coordinator pages are `https://walk.savvysolutionpros.com/c.html?o=demo`. If you see "Sign in through your organization's Cloudflare Access link", your email has not been added yet.
@@ -40,7 +40,7 @@ Coordinator pages are `https://walk.savvysolutionpros.com/c.html?o=demo`. If you
 
 ### C. Coordinator / admin (computer or tablet)
 1. Sign in at the coordinator link with the one-time code from your email.
-2. Find tester 3's application and approve them. Copy the check-in link it shows (shown once) and send it to tester 3.
+2. **Admin only:** find tester 3's application and approve them. Copy the check-in link it shows (shown once) and send it to tester 3. A coordinator sees "Approval: an admin" instead of the button: that's by design.
 3. Find the walk request from script A. Assign it to **two** approved volunteers. Try to assign only one: it must be refused.
 4. Call the family back (use the fake number; don't actually dial it) and mark the request done.
 5. Suspend a volunteer: their check-in link must stop working at once.
