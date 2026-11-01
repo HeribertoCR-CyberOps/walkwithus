@@ -13,8 +13,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/e2e.test.mjs",
     "test:ui": "node test/ui-smoke.mjs",
-    "deploy:ssp": "wrangler deploy -c wrangler.ssp.jsonc",
-    "db:migrate:ssp": "wrangler d1 migrations apply walkwithus --remote -c wrangler.ssp.jsonc",
+    "deploy:operator": "wrangler deploy -c wrangler.local.jsonc",
+    "db:migrate:operator": "wrangler d1 migrations apply walkwithus --remote -c wrangler.local.jsonc",
     "monitor": "node scripts/monitor.mjs",
     "test:property": "node --test test/property.test.ts"
   },

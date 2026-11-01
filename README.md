@@ -37,7 +37,7 @@ You run the program; the software is free. Read [`docs/FOR-ORGANIZATIONS.md`](do
 | `scripts/monitor.mjs` | External availability probe (also run by the `monitor` workflow) |
 | `docs/` | Blueprint, audit, SLO, deployment, organization guide, volunteer briefing, translations |
 | `wrangler.jsonc` | Template config for your own deployment |
-| `wrangler.ssp.jsonc` | The reference deployment operated by Savvy Solution Pros |
+| `wrangler.local.jsonc` | Your own deployment config (untracked): copy `wrangler.jsonc`, fill in your D1 id, Access AUD/team and route. `npm run deploy:operator` uses it. |
 
 ## Deploy (≈30 minutes, $0)
 

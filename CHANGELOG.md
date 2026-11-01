@@ -1,5 +1,13 @@
 # Changelog
 
+## Repository update — 2026-11-01 (app unchanged, still 1.1.8)
+**Public-repository hygiene: nothing in the repository describes how a particular deployment is operated.**
+- The operator's real config (D1 id, Access AUD and team domain, route) is no longer tracked: `wrangler.ssp.jsonc` became an untracked `wrangler.local.jsonc` (in `.gitignore`); scripts are `deploy:operator` and `db:migrate:operator`.
+- `docs/LAUNCH.md` is role-based (maintainer, operator, partner) with no host, tooling or key-custody details.
+- The incident runbook no longer describes a specific zone's protection settings, and warns against exempting the monitor by user agent or path (both spoofable).
+- Removed an outdated internal outreach draft (`docs/ORG-OUTREACH-EMAIL.md`). AI policy names no internal tools.
+- No behaviour change in the app.
+
 ## 1.1.8 — 2026-10-31
 **A family never sees a raw "HTTP 403" when Cloudflare's bot check intercepts a request.**
 - When the network edge answers an API call with its own challenge page (`cf-mitigated` header), the family and volunteer pages now show, in the visitor's language, "A security check is needed. Reload the page, then try again," with a **Reload page** button, the program's phone and the 911 link. A full reload lets the browser complete the human check; code cannot.

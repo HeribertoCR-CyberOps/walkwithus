@@ -15,7 +15,7 @@ if (!base) { console.error("usage: incident.mjs <base-url> [org-slug]"); process
 const DRY = process.env.DRY_RUN === "1";
 const TITLE = "Production health check failing";
 const LABEL = "incident";
-// When Cloudflare itself refuses the monitor (Bot Fight Mode cannot be skipped on the Free plan), the app was never
+// When the edge itself refuses the monitor (bot protection that cannot exempt the probe), the app was never
 // reached: that is "inconclusive", not an outage. It is tracked in its own issue and the run stays green with a warning.
 const BLOCKED_TITLE = "Monitor blocked by Cloudflare (inconclusive)";
 const BLOCKED_LABEL = "monitor-blocked";
@@ -27,11 +27,11 @@ const probe = () => {
 
 // Probe → what it means and what to do first. Keep in step with docs/DEPLOY.md §6.
 const RUNBOOK = {
-  cloudflare: "Cloudflare itself refused the probe (detail starts with cloudflare_). Usually the zone's bot protection challenging the monitor's data-center address, not an outage: check Security → Events for the ray id, then add a WAF skip/allow rule for the monitor (user agent walkwithus-monitor) or lower Browser Integrity Check / security level for /api/health*. Confirm real visitors are unaffected by loading the site from a phone.",
-  liveness: "The Worker is not answering. Check https://www.cloudflarestatus.com, then `npx wrangler deployments list -c wrangler.ssp.jsonc`; if the latest deploy is the cause, `npx wrangler rollback -c wrangler.ssp.jsonc`.",
+  cloudflare: "Cloudflare itself refused the probe (detail starts with cloudflare_). Usually the zone's bot protection challenging the monitor's data-center address, not an outage: check Security → Events for the ray id, then run the monitor from an address the edge does not challenge. Do not exempt the monitor by user agent or path: both can be spoofed by anyone. Confirm real visitors are unaffected by loading the site from a phone.",
+  liveness: "The Worker is not answering. Check https://www.cloudflarestatus.com, then `npx wrangler deployments list -c wrangler.local.jsonc`; if the latest deploy is the cause, `npx wrangler rollback -c wrangler.local.jsonc`.",
   readiness: "The Worker answers but reports problems (see `problems` in /api/health/ready). `db_unreachable`: D1 incident or quota (Workers Free fails queries past daily limits; Paid fixes it). `maintenance_stale_or_failing`: the hourly cron is not running or failing; check Workers → Logs for `maintenance_step_failed`. `audit_chain_broken`: stop and investigate; do not edit the audit table. `keys_invalid`: DATA_KEY/HMAC_KEY secret missing or malformed.",
   app_shell: "The home page or its security header changed. Confirm the last deploy and that `public/_headers` still sets the CSP `default-src 'none'`.",
-  no_injection: "Something is inserting scripts into pages (privacy promise broken). Check Cloudflare zone settings: Web Analytics automatic setup, Bot Fight Mode / JavaScript detections, Rocket Loader, Zaraz; and that `public/_headers` still sets `Cache-Control: … no-transform`.",
+  no_injection: "Something is inserting scripts into pages (privacy promise broken). Check zone settings that inject content: Web Analytics automatic setup, bot-protection JavaScript detections, Rocket Loader, Zaraz; and that `public/_headers` still sets `Cache-Control: … no-transform`.",
   emergency_page: "The 404 page lost its 911 link. Check `public/404.html` and the assets `not_found_handling` setting.",
   schedule: "The public schedule API failed. Families can still see the cached schedule for up to 24 h; check readiness first, then the org's slug and `active` flag.",
   monitor: "The monitor itself crashed; check the workflow logs.",
@@ -64,8 +64,8 @@ if (edgeOnly) {
   const note = `At ${stamp} Cloudflare refused the monitor before it reached the app (confirmed by a retry): ${what}.\n\n` +
     `This is **inconclusive, not an outage**: the probe never reached Walk With Us, so it can neither confirm nor rule out a problem. ` +
     `Families who get the same check see a translated "reload the page" message with 911 (v1.1.8).\n\n` +
-    `Cause seen so far: zone Bot Fight Mode challenging GitHub's data-center addresses (Free plan: no rule can exempt it). ` +
-    `Options: run the monitor from an address Cloudflare does not challenge, or turn Bot Fight Mode off. ` +
+    `Usual cause: the zone's bot protection challenging the monitor's data-center address. ` +
+    `Fix: run the monitor from an address the edge does not challenge. Do not exempt it by user agent; that can be spoofed. ` +
     `If you need certainty now, open ${base}/api/health from a phone. This issue closes itself when the monitor gets through.`;
   if (!blocked) {
     try { gh(["label", "create", BLOCKED_LABEL, "--color", "BF8700", "--description", "The edge refused the monitor; app state unknown"]); } catch { /* exists */ }

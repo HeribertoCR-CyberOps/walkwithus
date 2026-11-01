@@ -9,3 +9,6 @@ node_modules/
 *.pem
 sbom.cdx.json
 .DS_Store
+
+# Operator deployment config (real D1 id, Access AUD/team, routes). Copy wrangler.jsonc and fill it in; never commit.
+wrangler.local.jsonc
