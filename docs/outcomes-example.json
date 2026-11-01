@@ -1,0 +1,24 @@
+{
+  "study": "Pipeline check — arbitrary Bronx points, NOT a Walk With Us program",
+  "registered": "Example only. A real study fixes corners, controls, periods and windows BEFORE looking at outcomes (docs/OUTCOMES.md).",
+  "pre":  { "from": "2025-01-06", "to": "2025-06-20" },
+  "post": { "from": "2025-09-08", "to": "2026-06-26" },
+  "windows": [ { "start": "07:00", "end": "09:00" }, { "start": "14:00", "end": "16:30" } ],
+  "weekdays": [1, 2, 3, 4, 5],
+  "exclude_dates": [],
+  "radius_m": 150,
+  "sensitivity_radii_m": [100, 250],
+  "law_categories": ["FELONY", "MISDEMEANOR", "VIOLATION"],
+  "treated": [
+    { "id": "T1", "label": "Point T1 (40.8448, -73.8648)", "lat": 40.8448, "lon": -73.8648 },
+    { "id": "T2", "label": "Point T2 (40.8399, -73.8935)", "lat": 40.8399, "lon": -73.8935 },
+    { "id": "T3", "label": "Point T3 (40.8500, -73.8800)", "lat": 40.8500, "lon": -73.8800 }
+  ],
+  "controls": [
+    { "id": "C1", "label": "Point C1 (40.8600, -73.8900)", "lat": 40.8600, "lon": -73.8900 },
+    { "id": "C2", "label": "Point C2 (40.8300, -73.8700)", "lat": 40.8300, "lon": -73.8700 },
+    { "id": "C3", "label": "Point C3 (40.8700, -73.8600)", "lat": 40.8700, "lon": -73.8600 }
+  ],
+  "bootstrap_reps": 2000,
+  "seed": 20261101
+}

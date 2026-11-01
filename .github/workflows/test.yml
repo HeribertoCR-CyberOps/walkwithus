@@ -26,6 +26,8 @@ jobs:
       - name: Property-based tests (fast-check, crypto core)
         run: npm run test:property
         env: { FC_RUNS: "1000" }
+      - name: Outcome-study unit tests (no network)
+        run: npm run test:outcomes
       - run: npm test
         env: { CI: "1", WRANGLER_SEND_METRICS: "false" }
       - name: SBOM (CycloneDX)
