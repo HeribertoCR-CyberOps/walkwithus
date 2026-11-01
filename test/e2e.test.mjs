@@ -488,6 +488,44 @@ test("cron purge: expired requests deleted, done walks and adult-minutes aggrega
   assert.equal(agg.w, 1); assert.ok(agg.m > 0);
 });
 
+// ---------------------------------------------------------------- coverage export (docs/OUTCOMES.md)
+test("coverage export: admin only, aggregates only, small cells suppressed, range validated, audited", async () => {
+  sql(`INSERT INTO coverage_daily (org_id, day, corner_id, adult_minutes, walks_done) VALUES
+         (1,'2025-03-03',1,120,5), (1,'2025-03-03',2,90,2), (1,'2025-03-04',1,60,0), (1,'2025-03-05',2,30,1),
+         (2,'2025-03-03',3,999,9)`);
+  const url = (q) => `/api/c/crotona-test/coverage${q}`;
+  const q = "?from=2025-03-01&to=2025-03-31";
+  assert.equal((await req(url(q))).status, 401, "no Access token");
+  const c = await req(url(q), { token: COORD() });
+  assert.equal(c.status, 403); assert.equal(c.j.error, "admin_only", "plain coordinators cannot export");
+  assert.equal((await req(url(q), { token: jwt({ email: "other@org.test" }) })).status, 403, "another org's admin cannot export this org");
+  for (const bq of ["", "?from=2025-03-01", "?from=2025-02-30&to=2025-03-31", "?from=2025-03-31&to=2025-03-01",
+                    "?from=2023-01-01&to=2025-03-31", "?from=2025-3-1&to=2025-03-31", "?from=2025-03-01&to=2025-03-31%27--"]) {
+    const r = await req(url(bq), { token: ADMIN() });
+    assert.equal(r.status, 400, bq); assert.match(r.j.error, /^(bad_range|range_too_long)$/, bq);
+  }
+  const auditBefore = sql("SELECT COUNT(*) n FROM audit WHERE action='coverage_exported'")[0].n;
+  const r = await req(url(q), { token: ADMIN() });
+  assert.equal(r.status, 200, JSON.stringify(r.j));
+  assert.equal(r.headers.get("cache-control"), "no-store");
+  assert.equal(r.j.schema, "walkwithus.coverage.v1"); assert.equal(r.j.day_basis, "UTC calendar date"); assert.equal(r.j.min_cell, 3);
+  assert.equal(r.j.rows_count, 4); assert.equal(r.j.rows.length, 4);
+  assert.deepEqual(r.j.rows.map(x => [x.day, x.corner_id, x.adult_minutes, x.walks_done]),
+    [["2025-03-03", 1, 120, 5], ["2025-03-03", 2, 90, null], ["2025-03-04", 1, 60, 0], ["2025-03-05", 2, 30, null]]);
+  assert.equal(r.j.rows[1].walks_done_suppressed, true); assert.equal(r.j.rows[3].walks_done_suppressed, true);
+  assert.equal(r.j.rows[0].walks_done_suppressed, undefined); assert.equal(r.j.rows[2].walks_done_suppressed, undefined, "zero is not a small cell");
+  assert.deepEqual(r.j.rows[0], { day: "2025-03-03", corner_id: 1, label: "Crotona Ave & E 173 St", lat: 40.8399, lon: -73.8935,
+    adult_minutes: 120, walks_done: 5 }, "exactly the aggregate fields, nothing else");
+  assert.ok(!r.j.rows.some(x => x.corner_id === 3), "another org's corner never appears");
+  assert.ok(!/5550|Rivera|Osei|Diaz|@|phone|name_enc|cross_streets/.test(JSON.stringify(r.j)), "no personal data, emails or free text");
+  assert.equal(sql("SELECT COUNT(*) n FROM audit WHERE action='coverage_exported'")[0].n, auditBefore + 1);
+  assert.equal(sql("SELECT subject FROM audit WHERE action='coverage_exported' ORDER BY seq DESC LIMIT 1")[0].subject,
+    "range:2025-03-01..2025-03-31|rows:4");
+  const empty = await req(url("?from=2019-01-01&to=2019-12-31"), { token: ADMIN() });
+  assert.equal(empty.status, 200); assert.equal(empty.j.rows_count, 0);
+  sql("DELETE FROM coverage_daily WHERE day LIKE '2025-03-%'");   // leave later tests the purge-produced totals they expect
+});
+
 // ---------------------------------------------------------------- v1.1 hardening
 test("observability: every API response carries a request id and API-level CSP/HSTS", async () => {
   const r = await req("/api/o/crotona-test");

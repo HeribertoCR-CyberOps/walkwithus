@@ -30,7 +30,7 @@ export interface Env {
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.1.8";
+const VERSION = "1.2.0";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)
@@ -416,6 +416,8 @@ async function volunteerApi(req: Request, env: Env, action: string): Promise<Res
 // ------------------------------------------------------------------ coordinator handlers (Access + coordinators)
 /** A coordinator can decrypt at most 30 contact numbers per hour. Normal work needs a handful; a bulk export cannot hide. */
 const REVEALS_PER_HOUR = 30;
+const COVERAGE_MIN_CELL = 3;      // walks_done of 1..COVERAGE_MIN_CELL-1 is reported as null (small-cell suppression)
+const COVERAGE_MAX_DAYS = 731;    // one export covers at most two years
 async function revealGuard(env: Env, orgId: number, actor: string): Promise<void> {
   try { await limit(env, "reveal", actor, REVEALS_PER_HOUR, 3600); }
   catch (e) {
@@ -479,6 +481,33 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
       readiness: ready, unreadable_records: unreadable, today: { ...today, walk_cap: cap.walk, apply_cap: cap.apply,
         walks_near_cap: today.walks >= Math.ceil(cap.walk * 0.8), applications_near_cap: today.applications >= Math.ceil(cap.apply * 0.8) },
       rule_of_two: "a corner counts as covered only with >= 2 adults; a walk is assigned only to 2 distinct approved adults" });
+  }
+
+  // Anonymous coverage export for outcome studies (docs/OUTCOMES.md). Admins only. It reads ONLY coverage_daily, the
+  // aggregate the purge leaves behind: no names, phones, walk requests or per-person shift rows exist in it. Days are the
+  // UTC calendar date of the shift check-in / walk slot (see purge()). Cells of 1-2 walks are suppressed so a single
+  // family's walk cannot be singled out of a shared report.
+  if (req.method === "GET" && res === "coverage" && !rid) {
+    if (role !== "admin") throw new HttpError(403, "admin_only");
+    const q = new URL(req.url).searchParams;
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    const valid = (s: string) => iso.test(s) && new Date(s + "T00:00:00Z").toISOString().slice(0, 10) === s;
+    const from = q.get("from") ?? "", to = q.get("to") ?? "";
+    if (!valid(from) || !valid(to) || from > to) bad("bad_range");
+    if ((Date.parse(to) - Date.parse(from)) / 86400000 > COVERAGE_MAX_DAYS) bad("range_too_long");
+    const { results } = await env.DB.prepare(
+      `SELECT d.day, d.corner_id, c.label, c.lat, c.lon, d.adult_minutes, d.walks_done
+         FROM coverage_daily d JOIN corners c ON c.id = d.corner_id AND c.org_id = d.org_id
+        WHERE d.org_id = ? AND d.day BETWEEN ? AND ? ORDER BY d.day, d.corner_id`).bind(org.id, from, to)
+      .all<{ day: string; corner_id: number; label: string; lat: number; lon: number; adult_minutes: number; walks_done: number }>();
+    const rows = results.map(r => {
+      const small = r.walks_done > 0 && r.walks_done < COVERAGE_MIN_CELL;
+      return { day: r.day, corner_id: r.corner_id, label: r.label, lat: r.lat, lon: r.lon, adult_minutes: r.adult_minutes,
+        walks_done: small ? null : r.walks_done, ...(small ? { walks_done_suppressed: true } : {}) };
+    });
+    await audit(env, org.id, actor, "coverage_exported", `range:${from}..${to}|rows:${rows.length}`);
+    return json({ schema: "walkwithus.coverage.v1", org: org.slug, from, to, day_basis: "UTC calendar date",
+      min_cell: COVERAGE_MIN_CELL, rows_count: rows.length, rows, generated_at: new Date(now * 1000).toISOString() });
   }
 
   if (req.method !== "POST") throw new HttpError(405, "method");

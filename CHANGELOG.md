@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 — 2026-11-01
+**Programs can measure outcomes with public data, without collecting anything new.**
+- New admin-only `GET /api/c/:slug/coverage?from=&to=`: anonymous per-corner, per-day adult-minutes and completed walks, read only from the aggregate the 72-hour purge leaves behind. Days with 1–2 walks are suppressed. Coordinators cannot export. Every export is audited (`coverage_exported`). Ranges are validated and capped at 731 days.
+- New `scripts/outcomes.mjs` (no dependencies): difference-in-differences of NYPD complaint rates near covered versus pre-registered control corners during school-travel hours, using NYC Open Data (`qgea-i56i`, `5uac-w243`).
+  - Checks: seeded corner-level bootstrap intervals, placebo pre-trend check, sensitivity radii, spillover and bad-coordinate warnings, truncation to the published data end, and a minimum-sample guard.
+  - Requests six fields only, never demographics, and refuses responses carrying any other field.
+  - Reports carry dataset freshness and SHA-256 hashes of the input.
+- `docs/OUTCOMES.md`: how to pre-register a study, run it and read it, with its limitations. `docs/outcomes-example.json` is a pipeline check on arbitrary points.
+- CI runs the new unit tests (16, no network). End-to-end tests: 30, including the export (access, suppression, range validation, no personal fields, audit).
+- The family and volunteer pages are unchanged.
+
 ## Repository update — 2026-11-01 (app unchanged, still 1.1.8)
 **Public-repository hygiene: nothing in the repository describes how a particular deployment is operated.**
 - The operator's real config (D1 id, Access AUD and team domain, route) is no longer tracked: `wrangler.ssp.jsonc` became an untracked `wrangler.local.jsonc` (in `.gitignore`); scripts are `deploy:operator` and `db:migrate:operator`.
