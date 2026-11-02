@@ -28,14 +28,17 @@ const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 20
 const jwk = publicKey.export({ format: "jwk" });
 rmSync(P, { recursive: true, force: true }); mkdirSync(".wrangler", { recursive: true });
 writeFileSync(".dev.vars", [`DATA_KEY=${randomBytes(32).toString("base64")}`, `HMAC_KEY=${randomBytes(32).toString("base64")}`,
-  "ACCESS_TEAM_DOMAIN=t.cloudflareaccess.com", "ACCESS_AUD=a", `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: "k", alg: "RS256" }] })}`].join("\n") + "\n");
+  "ACCESS_TEAM_DOMAIN=t.cloudflareaccess.com", "ACCESS_AUD=a", "OPERATOR_EMAILS=ops@demo.test", `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: "k", alg: "RS256" }] })}`].join("\n") + "\n");
 execFileSync("npx", ["wrangler", "d1", "migrations", "apply", "walkwithus", "--local", "--persist-to", P], { stdio: "ignore" });
+// A closure two days out: every family-page language must render the closure list, and that day must offer no times.
+const CLOSED_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(Date.now() + 2 * 86400000));
 const win = [0, 1, 2, 3, 4, 5, 6].flatMap((d) => [`(1,1,${d},450,525)`, `(1,1,${d},870,945)`, `(1,2,${d},0,1440)`]).join(",");
 execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--persist-to", P, "--command",
   `INSERT INTO orgs (id,slug,name,borough,public_phone,demo) VALUES (1,'demo','Demo Program','Bronx','(718) 555-0100',1);
    INSERT INTO corners (id,org_id,label,cross_streets,lat,lon) VALUES (1,1,'Corner A','Example Ave & 1st St',40.84,-73.89),(2,1,'Corner B','Example Ave & 2nd St',40.841,-73.891);
    INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${win};
-   INSERT INTO coordinators (email,org_id,role) VALUES ('lead@demo.test',1,'admin'), ('coord@demo.test',1,'coordinator');`], { stdio: "ignore" });
+   INSERT INTO coordinators (email,org_id,role) VALUES ('lead@demo.test',1,'admin'), ('coord@demo.test',1,'coordinator');
+   INSERT INTO closures (org_id,day,reason) VALUES (1,'${CLOSED_DAY}','holiday');`], { stdio: "ignore" });
 const LOGFD = openSync(".wrangler/ui-smoke.log", "w");
 const proc = spawn("npx", ["wrangler", "dev", "--local", "--port", String(PORT), "--persist-to", P, "--ip", "127.0.0.1", "--local-protocol", PROTO],
   { stdio: ["ignore", LOGFD, LOGFD], detached: true });
@@ -96,6 +99,30 @@ for (const who of ["lead@demo.test", "coord@demo.test"]) {
   await check(`coordinator ${who}`, { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok(who) } }, ready: "text=Program status" },
     B + "/c.html?o=demo", async (pg, text) => { assert.equal(/Admin/.test(text), who.startsWith("lead"), "admin section only for admins"); });
 }
+// Closure day: listed for families, and choosing it offers no times.
+await check("closure day shown and not bookable", { ctx: {}, ready: "#wh" }, B + "/?o=demo", async (pg, text) => {
+  assert.ok(await pg.isVisible('[role="note"]'), "closure list visible");
+  assert.ok(/School holiday/.test(text));
+  await pg.fill("#w-date", CLOSED_DAY); await pg.dispatchEvent("#w-date", "change");
+  assert.deepEqual(await pg.$$eval("#w-time option", (o) => o.map((x) => [x.value, x.textContent])), [["", "No adults on the corners that day. Choose another date."]]);
+});
+// A new program lead: signs in, sees the sign-up form, submits, lands on the pending dashboard.
+await check("new lead signs up and sees the pending dashboard", { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok("new@lead.test") } }, ready: "#jh" },
+  B + "/c.html", async (pg) => {
+    await pg.fill("#j-name", "Hunts Point Walkers");
+    assert.equal(await pg.inputValue("#j-slug"), "hunts-point-walkers", "web address suggested from the name");
+    for (const k of ["ack_lead", "ack_meet_in_person", "ack_rule_of_two", "ack_not_emergency", "ack_coverage"]) await pg.check("#" + k);
+    await pg.click("text=Submit for review");
+    await pg.waitForSelector("text=Waiting for review", { timeout: 15000 });
+    assert.match(pg.url(), /\?o=hunts-point-walkers$/);
+    assert.ok(await pg.isVisible("text=Add the NYC Public Schools 2026-27 days off"));
+  });
+// The operator sees it waiting, first.
+await check("operator review lists the pending program", { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok("ops@demo.test") } }, ready: "#oph" },
+  B + "/c.html", async (pg, text) => {
+    assert.ok(/Operator: program review \(1 waiting\)/.test(text));
+    assert.ok(/Hunts Point Walkers/.test(text) && /new@lead\.test/.test(text));
+  });
 // Demo program: the walk form submits, shows the "nothing was saved" note, and stores nothing.
 await check("demo walk request shows 'nothing saved'", { ctx: {}, ready: "#wh" }, B + "/?o=demo", async (pg) => {
   await pg.fill("#w-cb", "(718) 555-0123"); await pg.check("#w-consent"); await pg.click("form button[type=submit]");
@@ -136,9 +163,9 @@ for (const [code, dir] of [["en", "ltr"], ["es", "ltr"], ["ar", "rtl"]]) {
 }
 // Now add a real program that has no approved adults yet (inserted while the server runs, after the home-page checks).
 execFileSync("npx", ["wrangler", "d1", "execute", "walkwithus", "--local", "--persist-to", P, "--command",
-  `INSERT INTO orgs (id,slug,name,borough) VALUES (2,'notready','Not Ready Program','Queens');
-   INSERT INTO corners (id,org_id,label,cross_streets,lat,lon) VALUES (3,2,'Corner N','Example Rd & 3rd St',40.75,-73.85);
-   INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${[0, 1, 2, 3, 4, 5, 6].map((d) => `(2,3,${d},0,1440)`).join(",")};`], { stdio: "ignore" });
+  `INSERT INTO orgs (id,slug,name,borough) VALUES (20,'notready','Not Ready Program','Queens');
+   INSERT INTO corners (id,org_id,label,cross_streets,lat,lon) VALUES (30,20,'Corner N','Example Rd & 3rd St',40.75,-73.85);
+   INSERT INTO windows (org_id,corner_id,dow,start_min,end_min) VALUES ${[0, 1, 2, 3, 4, 5, 6].map((d) => `(20,30,${d},0,1440)`).join(",")};`], { stdio: "ignore" });
 // A real program without two approved adults: the walk form is replaced by an honest notice; the volunteer form stays.
 await check("not-ready program hides the walk form", { ctx: {}, ready: "#wh" }, B + "/?o=notready", async (pg) => {
   assert.equal(await pg.$("#w-cb"), null, "walk form must not render");
