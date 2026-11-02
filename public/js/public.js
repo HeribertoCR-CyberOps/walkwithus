@@ -230,7 +230,8 @@ async function render() {
     content.replaceChildren(...[state.stale ? el("p", { class: "result err", text: T().stale }) : null,
       cornersCard(), state.corners.length ? (state.accepting ? walkCard() : notReadyCard()) : null, volunteerCard(), rightsCard(), privacyCard()].filter(Boolean));
   } catch (err) {
-    content.replaceChildren(el("p", { class: "result err", role: "alert", text: errText(err) }), reloadButton(err));
+    content.replaceChildren(...[el("p", { class: "result err", role: "alert", text: errText(err) }),
+      err && err.code === "no_org" ? el("p", {}, el("a", { href: "/", text: T().pick_org })) : null, reloadButton(err)].filter(Boolean));
   }
 }
 

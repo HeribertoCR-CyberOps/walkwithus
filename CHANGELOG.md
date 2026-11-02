@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.1 — 2026-11-02
+**Families who open a program link that isn't available now see a plain message, not an error code.**
+- Found in the founder's live production test of 1.4.0. A declined test program opened at `/?o=test-hc` showed "Something went wrong: no_org" and a stray "null".
+- The same happened for any program that doesn't exist or is pending.
+- The page now says the program isn't available, links back to the program list, and keeps the 911, tip-line and crisis-line buttons. The text is in all 11 languages.
+- Nothing about the program is revealed. Pending, declined and unknown programs look identical, as before.
+- Service-worker cache `wwu-v13`, so phones pick up the fix.
+- Tests: new UI check, run in Chromium and WebKit. It fails on 1.4.0 and passes on 1.4.1.
+
 ## 1.4.0 — 2026-11-02
 **Operators can set up a program straight from an intake and assign its lead.**
 - New operator action: **Set up a program from an intake**.
