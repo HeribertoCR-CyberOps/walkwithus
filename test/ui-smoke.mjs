@@ -206,6 +206,22 @@ for (const [label, url] of [["family page rejects crafted org slug", "/?o=..%2F.
   } catch (e) { failures.push(label); console.log("FAIL", label, "—", e.message.split("\n")[0]); }
   await ctx.close();
 }
+// A program that does not exist, or is pending or declined, answers 404 no_org. Families must see a plain message, the way
+// back to the program list and 911, never a raw error code or a stray "null" (both were live in 1.4.0).
+await (async () => {
+  const label = "unknown program shows a plain message";
+  const ctx = await browser.newContext(); const pg = await ctx.newPage();
+  try {
+    await pg.goto(B + "/?o=no-such-program"); await pg.waitForLoadState("networkidle");
+    const text = await pg.locator("#content").innerText();
+    assert.match(text, /isn't available/, "plain message missing: " + text);
+    assert.doesNotMatch(text, /no_org|\bnull\b|Something went wrong/, "raw error shown: " + text);
+    assert.equal(await pg.locator('#content a[href="/"]').count(), 1, "no link back to the program list");
+    assert.ok(await pg.locator('a[href="tel:911"]').count() >= 1, "911 link missing");
+    console.log("ok  ", label);
+  } catch (e) { failures.push(label); console.log("FAIL", label, "—", e.message.split("\n")[0]); }
+  await ctx.close();
+})();
 // After the last slot of the day (20:00 NY), the walk form must move to the next day with open times instead of showing an empty list.
 await (async () => {
   const label = "walk form skips a day with no times left";
