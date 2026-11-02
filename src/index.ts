@@ -994,7 +994,8 @@ async function programJoin(req: Request, env: Env): Promise<Response> {
   const name = str(b.name, 3, 120, "bad_name");
   const slug = str(b.slug, 3, 40, "bad_slug").toLowerCase();
   if (!/^[a-z0-9](?:[a-z0-9-]{1,38})[a-z0-9]$/.test(slug) || slug.includes("--")) bad("bad_slug");
-  if (RESERVED_SLUGS.includes(slug)) bad("slug_reserved");
+  // "x<id>-…" is the form maintenance gives a released address; nobody may sign up under it (or it could never be released).
+  if (RESERVED_SLUGS.includes(slug) || /^x\d+-/.test(slug)) bad("slug_reserved");
   if (typeof b.borough !== "string" || !BOROUGHS.includes(b.borough)) bad("bad_borough");
   if (typeof b.org_type !== "string" || !ORG_TYPES.includes(b.org_type)) bad("bad_org_type");
   const pub = b.public_phone === undefined || b.public_phone === "" ? null : formatPhone(phone(b.public_phone));
@@ -1037,7 +1038,7 @@ async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Resp
   if (req.method === "GET" && res === "programs" && !slug) {
     const { results } = await env.DB.prepare(
       `SELECT o.slug, o.name, o.borough, o.org_type, o.status, o.public_phone, o.applied_at, o.reviewed_at, o.demo,
-              COALESCE(o.applied_by, (SELECT group_concat(email, ', ') FROM coordinators c WHERE c.org_id=o.id AND c.role='admin')) AS lead,
+              o.applied_by AS lead,   -- NULL = not recorded (program set up by hand, or signed up before 1.3.1): never guessed
               (SELECT group_concat(email || ' (' || role || ')', ', ') FROM coordinators c WHERE c.org_id=o.id AND c.email IS NOT o.applied_by) AS other_coordinators,
               (SELECT COUNT(*) FROM corners c WHERE c.org_id=o.id AND c.active=1) AS corners,
               (SELECT COUNT(*) FROM windows w WHERE w.org_id=o.id) AS windows,

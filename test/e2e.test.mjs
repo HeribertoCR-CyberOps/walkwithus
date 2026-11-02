@@ -778,6 +778,7 @@ test("operator decline: program disappears, its links stop, its lead cannot open
 test("v1.3.1 hardening: sign-up identity, pending limits, booked-walk notices, self-draining queue", async () => {
   // Bidirectional overrides cannot be used to spoof a program name.
   assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "bidi@q.test" }), body: joinBody({ slug: "bidi-x", name: "Safe \u202eSKRAW" }) })).j.error, "bad_name");
+  assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "bidi@q.test" }), body: joinBody({ slug: "x12-bronx" }) })).j.error, "slug_reserved", "the released-address form is reserved");
   // A pending program's lead cannot make anyone else an admin (nobody can be made to look like its lead) …
   const L2 = () => jwt({ email: "l2@q.test" });
   assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: "victim@x.test", role: "admin" } })), [400, "admin_after_review"]);

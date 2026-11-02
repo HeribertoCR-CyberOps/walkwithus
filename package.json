@@ -18,6 +18,7 @@
     "monitor": "node scripts/monitor.mjs",
     "test:property": "node --test test/property.test.ts",
     "test:outcomes": "node --test test/outcomes.test.mjs",
+    "test:migrations": "node --test test/migrations.test.mjs",
     "outcomes": "node scripts/outcomes.mjs"
   },
   "devDependencies": {

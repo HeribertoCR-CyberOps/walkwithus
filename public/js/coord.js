@@ -221,8 +221,8 @@ async function operatorSection() {
   const when = (t) => (t ? new Date(t * 1000).toLocaleDateString() : "—");
   const rows = programs.filter((p) => !p.demo).map((p) => el("tr", {},
     el("td", {}, el("strong", { text: p.name }), el("div", { class: "muted", text: `${p.slug} · ${p.borough || "—"} · ${p.org_type || "—"}` }),
-      el("div", { class: "muted", text: `Signed up by: ${p.lead || "—"}${p.public_phone ? " · " + p.public_phone : ""}` }),
-      p.other_coordinators ? el("div", { class: "muted", text: `Added by the lead (not verified): ${p.other_coordinators}` }) : null),
+      el("div", { class: p.lead ? "muted" : "result err", text: `Signed up by: ${p.lead || "not recorded (set up by hand or before v1.3.1): verify who leads it"}${p.public_phone ? " · " + p.public_phone : ""}` }),
+      p.other_coordinators ? el("div", { class: "muted", text: `${p.lead ? "Added by the lead (not verified)" : "Coordinators"}: ${p.other_coordinators}` }) : null),
     el("td", {}, el("span", { class: "badge " + (p.status === "live" ? "ok" : p.status === "pending" ? "warn" : ""), text: p.status }),
       el("div", { class: "muted", text: `applied ${when(p.applied_at)} · reviewed ${when(p.reviewed_at)}` }),
       el("div", { class: "muted", text: `${p.corners} corners · ${p.windows} hours · ${p.coordinators} coordinators` })),
