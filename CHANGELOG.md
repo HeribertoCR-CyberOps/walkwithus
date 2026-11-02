@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 — 2026-11-02
+**Operators can set up a program straight from an intake and assign its lead.**
+- New operator action: **Set up a program from an intake**.
+  - The operator enters the program and the lead's email, confirms the five commitments with the lead, and creates the program *pending* or *live*.
+  - The lead signs in with that email and runs that program only: corners, hours, closures, coordinators and volunteers.
+  - Same validation as self sign-up (one shared function), one-pending-per-lead still enforced, audited with the lead recorded by keyed hash.
+- Dependabot now waits 5 days before proposing a new release (30 for major versions) as a supply-chain cooldown. Security updates are not delayed.
+- Tests: e2e 37 (1 new).
+
 ## 1.3.1 — 2026-11-02
 **Hardening of program sign-up after an independent security review.** No change for families or volunteers.
 - **Sign-up identity.**

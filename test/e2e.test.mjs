@@ -822,3 +822,30 @@ test("v1.3.1 hardening: sign-up identity, pending limits, booked-walk notices, s
   assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "l1@q.test" }), body: joinBody({ slug: "queue-1" }) })).status, 201, "and can be used again");
   assert.equal((await req("/api/health/ready")).j.ok, true, "maintenance still healthy");
 });
+
+test("operator sets up a program from an intake and assigns its lead; the lead then runs it", async () => {
+  const body = { name: "Highbridge Walk Partners", slug: "highbridge", borough: "Bronx", org_type: "nonprofit", lead_email: "Host@Intake.test",
+    status: "live", commitments_confirmed: true };
+  const OP = (b, t = OPS()) => req("/api/c/op/programs", { method: "POST", token: t, body: b });
+  assert.equal((await OP(body, LEAD())).j.error, "operator_only", "only operators");
+  for (const [o, code] of [[{ commitments_confirmed: false }, "commitments_required"], [{ status: "open" }, "bad_status"],
+      [{ lead_email: "nope" }, "bad_email"], [{ slug: "join" }, "slug_reserved"], [{ slug: "mott-haven" }, "slug_taken"], [{ extra: 1 }, "unknown_field:extra"]]) {
+    const r = await OP({ ...body, ...o }); assert.equal(r.j.error, code, JSON.stringify(o));
+  }
+  const c = await OP(body);
+  assert.deepEqual([c.status, c.j.slug, c.j.status, c.j.lead], [201, "highbridge", "live", "host@intake.test"], "email stored lowercase");
+  assert.equal((await req("/api/o/highbridge")).status, 200, "live at once: the operator verified it");
+  const me = await req("/api/c/me", { token: jwt({ email: "host@intake.test" }) });
+  assert.deepEqual(me.j.orgs, [{ slug: "highbridge", name: "Highbridge Walk Partners", status: "live", role: "admin", applied: 1 }]);
+  const list = (await req("/api/c/op/programs", { token: OPS() })).j.programs.find((p) => p.slug === "highbridge");
+  assert.deepEqual([list.lead, list.status], ["host@intake.test", "live"]);
+  const a = sql("SELECT actor, action, subject FROM audit WHERE action='program_created' ORDER BY seq DESC LIMIT 1")[0];
+  assert.equal(a.actor, "ops@maintainer.test"); assert.match(a.subject, /^status:live\|lead:[0-9a-f]{16}$/, "the lead's email is not in the audit chain");
+  // The assigned lead manages their own program, and only it.
+  assert.equal((await req("/api/c/highbridge/corners", { method: "POST", token: jwt({ email: "host@intake.test" }),
+    body: { label: "Ogden Ave & W 168 St", cross_streets: "by the school gate", lat: 40.8402, lon: -73.9301 } })).status, 201);
+  assert.equal((await req("/api/c/mott-haven/dashboard", { token: jwt({ email: "host@intake.test" }) })).j.error, "not_a_coordinator_for_org");
+  // A pending set-up respects the one-pending-per-lead rule.
+  assert.equal((await OP({ ...body, slug: "hb-two", status: "pending" })).status, 201);
+  assert.equal((await OP({ ...body, slug: "hb-three", status: "pending" })).j.error, "application_pending");
+});

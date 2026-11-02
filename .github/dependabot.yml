@@ -6,6 +6,11 @@ updates:
     open-pull-requests-limit: 5
     labels: [dependencies]
     commit-message: { prefix: "deps", include: scope }
+    # Supply-chain cooldown: a release must be public this long before it is proposed, so a compromised or broken release
+    # is usually yanked first (npm worm incidents in 2025 spread within hours). Security updates are not delayed.
+    cooldown:
+      default-days: 5
+      semver-major-days: 30
     ignore:
       # TypeScript 7 is the native (Go) compiler rewrite; adopt deliberately in its own PR, not as a routine bump.
       - dependency-name: typescript
@@ -19,6 +24,8 @@ updates:
     schedule: { interval: weekly, day: monday, time: "06:00", timezone: America/New_York }
     labels: [dependencies, ci]
     commit-message: { prefix: "ci" }
+    cooldown:
+      default-days: 5
     groups:
       actions:
         patterns: ["*"]
