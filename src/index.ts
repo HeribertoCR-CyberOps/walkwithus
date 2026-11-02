@@ -32,7 +32,7 @@ export interface Env {
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.3.1";
+const VERSION = "1.4.0";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)
@@ -984,13 +984,8 @@ function isOperator(env: Env, email: string): boolean {
 }
 const formatPhone = (e164: string) => `(${e164.slice(2, 5)}) ${e164.slice(5, 8)}-${e164.slice(8)}`;
 
-async function programJoin(req: Request, env: Env): Promise<Response> {
-  const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
-  if (!id) throw new HttpError(401, "access_required");
-  const email = id.email.toLowerCase();
-  await limit(env, "join-email", email, 20, 86400);
-  await limit(env, "join-net", clientNet(req), 10, 86400);
-  const b = await body<Record<string, unknown>>(req, ["name", "slug", "borough", "org_type", "public_phone", ...JOIN_ACKS]);
+/** Program fields shared by self sign-up and operator set-up: one validation, one set of rules. */
+function programFields(b: Record<string, unknown>): { name: string; slug: string; pub: string | null } {
   const name = str(b.name, 3, 120, "bad_name");
   const slug = str(b.slug, 3, 40, "bad_slug").toLowerCase();
   if (!/^[a-z0-9](?:[a-z0-9-]{1,38})[a-z0-9]$/.test(slug) || slug.includes("--")) bad("bad_slug");
@@ -999,6 +994,17 @@ async function programJoin(req: Request, env: Env): Promise<Response> {
   if (typeof b.borough !== "string" || !BOROUGHS.includes(b.borough)) bad("bad_borough");
   if (typeof b.org_type !== "string" || !ORG_TYPES.includes(b.org_type)) bad("bad_org_type");
   const pub = b.public_phone === undefined || b.public_phone === "" ? null : formatPhone(phone(b.public_phone));
+  return { name, slug, pub };
+}
+
+async function programJoin(req: Request, env: Env): Promise<Response> {
+  const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
+  if (!id) throw new HttpError(401, "access_required");
+  const email = id.email.toLowerCase();
+  await limit(env, "join-email", email, 20, 86400);
+  await limit(env, "join-net", clientNet(req), 10, 86400);
+  const b = await body<Record<string, unknown>>(req, ["name", "slug", "borough", "org_type", "public_phone", ...JOIN_ACKS]);
+  const { name, slug, pub } = programFields(b);
   for (const k of JOIN_ACKS) if (b[k] !== true) bad("commitments_required");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) bad("bad_email");
   const cap = Math.max(1, Number(env.JOIN_PENDING_CAP) || 25);
@@ -1045,6 +1051,35 @@ async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Resp
               (SELECT COUNT(*) FROM coordinators c WHERE c.org_id=o.id) AS coordinators
        FROM orgs o WHERE o.active=1 ORDER BY CASE o.status WHEN 'pending' THEN 0 WHEN 'live' THEN 1 ELSE 2 END, o.applied_at`).all();
     return json({ programs: results });
+  }
+  // Operator set-up from an intake: the operator has already spoken with the organization, so the program is created for
+  // its named lead (who then signs in with that email and manages corners, hours, coordinators and volunteers).
+  if (req.method === "POST" && res === "programs" && !slug) {
+    const b = await body<Record<string, unknown>>(req, ["name", "slug", "borough", "org_type", "public_phone", "lead_email", "status", "commitments_confirmed"]);
+    const f = programFields(b);
+    const lead = str(b.lead_email, 6, 254, "bad_email").toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(lead)) bad("bad_email");
+    if (b.status !== "pending" && b.status !== "live") bad("bad_status");
+    if (b.commitments_confirmed !== true) bad("commitments_required");   // the operator confirms the five commitments with the lead
+    const now = Math.floor(Date.now() / 1000);
+    let orgId: number;
+    try {
+      const [r] = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO orgs (slug, name, borough, public_phone, demo, status, org_type, applied_at, reviewed_at, applied_by)
+           VALUES (?1,?2,?3,?4,0,?5,?6,?7,?8,?9)`)
+          .bind(f.slug, f.name, b.borough, f.pub, b.status, b.org_type, now, b.status === "live" ? now : null, lead),
+        env.DB.prepare("INSERT INTO coordinators (email, org_id, role) SELECT ?1, id, 'admin' FROM orgs WHERE slug=?2 AND applied_by=?1").bind(lead, f.slug),
+      ]);
+      orgId = Number(r!.meta.last_row_id);
+    } catch (e) {
+      const m = String(e);
+      if (m.includes("UNIQUE") && m.includes("applied_by")) throw new HttpError(409, "application_pending");
+      if (m.includes("UNIQUE")) throw new HttpError(409, "slug_taken");
+      throw e;
+    }
+    await audit(env, orgId, id.email, "program_created", `status:${b.status}|lead:${(await hmac(env.HMAC_KEY, "email|" + lead)).slice(0, 16)}`);
+    return json({ ok: true, slug: f.slug, status: b.status, lead }, 201);
   }
   if (req.method === "POST" && res === "programs" && slug && (verb === "approve" || verb === "decline")) {
     const b = await body<Record<string, unknown>>(req, ["force"]);

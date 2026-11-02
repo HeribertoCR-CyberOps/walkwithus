@@ -41,6 +41,8 @@ The Worker verifies the Access JWT itself (RS256, issuer, audience, expiry, key 
 
 **Self-serve (v1.3):** the lead opens `/c.html`, signs in through Access, fills in **Start a Walk With Us program** (name, web address, borough, organization type, optional program phone, five commitments) and submits. The program is created as *pending*: the lead can add corners, hours, closure days and coordinators, but nothing is public. An operator opens `/c.html`, sees **Operator: program review**, verifies the organization (website, EIN or fiscal-sponsor letter, a call with the lead) and presses **Approve**. The public page, volunteer form and walk form open at once; the walk form still waits for two approved adults. **Decline / Take offline** closes the program and stops its volunteer links immediately; it can be reversed.
 
+**From an intake (operator, v1.4):** after speaking with an organization, the operator opens `/c.html` → **Operator: program review** → **Set up a program from an intake**, enters the program details and the lead's email, confirms the five commitments with the lead, and creates it as *pending* or *live*. The lead signs in with that email and manages that program only: its corners, hours, closures, coordinators and volunteers.
+
 **By hand (operator):**
 
 ```bash

@@ -16,7 +16,7 @@ const ERR = {
   admin_after_review: "Until the program is reviewed, only the person who signed it up can be an admin. Add this person as a coordinator now; make them an admin after review.",
   too_many_coordinators: "This program has reached its coordinator limit (5 before review, 50 after).",
   too_many_corners: "This program has reached its limit of 50 active corners.", too_many_windows: "This program has reached its limit of 300 published hour blocks.",
-  rate_limited: "Too many changes in the last hour. Please wait and try again.", application_pending: "You already have a program waiting for review.",
+  rate_limited: "Too many changes in the last hour. Please wait and try again.", bad_status: "Choose pending or live.", bad_email: "Enter a valid email address.", application_pending: "You already have a program waiting for review.",
   slug_taken: "That web address is taken. Choose another.", slug_reserved: "That web address is reserved. Choose another.",
   commitments_required: "Please confirm all five commitments.", review_queue_full: "The review queue is full right now. Please try again in a few days or write to the maintainers.",
 };
@@ -241,7 +241,24 @@ async function operatorSection() {
         }
         load(); }) }) : null))));
   const pending = programs.filter((p) => p.status === "pending").length;
-  return el("section", { class: "card", "aria-labelledby": "oph" }, el("h2", { id: "oph", text: `Operator: program review (${pending} waiting)` }),
+  // Set up a program from an intake: the operator has spoken with the organization and assigns its lead's email.
+  const inp = (id, label, attrs = {}) => [el("label", { for: id, text: label }), el("input", { id, type: "text", ...attrs })];
+  const v = (id) => document.getElementById(id).value.trim();
+  const setup = el("details", {}, el("summary", { text: "Set up a program from an intake" }),
+    el("p", { class: "muted", text: "Use this after you have spoken with the organization. Its lead signs in with the email below and then manages corners, hours, coordinators and volunteers for this program only." }),
+    ...inp("o-name", "Program name", { maxlength: 120 }), ...inp("o-slug", "Web address (?o=…)", { maxlength: 40 }),
+    ...inp("o-lead", "Lead's email (they sign in with it)", { type: "email" }),
+    el("label", { for: "o-borough", text: "Borough" }), el("select", { id: "o-borough" }, ...BOROUGHS.map((b) => el("option", { value: b, text: b }))),
+    el("label", { for: "o-type", text: "Organization type" }), el("select", { id: "o-type" }, ...ORG_TYPES.map(([k, t]) => el("option", { value: k, text: t }))),
+    ...inp("o-phone", "Program phone shown to families (optional)", { type: "tel" }),
+    el("label", { for: "o-status", text: "Start as" }), el("select", { id: "o-status" },
+      el("option", { value: "pending", text: "Pending: the lead prepares it, nothing public yet" }), el("option", { value: "live", text: "Live: verified now, public page opens" })),
+    el("label", { class: "check" }, el("input", { type: "checkbox", id: "o-commit" }), el("span", { text: "I confirmed the five commitments with the lead (named lead and coordinator, volunteers met in person, Rule of Two, not an emergency service, liability coverage or fiscal sponsor)." })),
+    el("button", { text: "Create program", onclick: () => act(box, async () => {
+      const r = await api("/api/c/op/programs", "POST", { name: v("o-name"), slug: v("o-slug"), lead_email: v("o-lead"), borough: v("o-borough"),
+        org_type: v("o-type"), public_phone: v("o-phone"), status: v("o-status"), commitments_confirmed: document.getElementById("o-commit").checked });
+      note(box, true, `Created ${r.slug} (${r.status}) for ${r.lead}. Ask them to open the coordinator page and sign in with that email.`); setTimeout(load, 4000); }) }));
+  return el("section", { class: "card", "aria-labelledby": "oph" }, el("h2", { id: "oph", text: `Operator: program review (${pending} waiting)` }), setup,
     el("p", { class: "muted", text: "Before approving: confirm the organization exists (website, EIN or sponsor letter), speak with the lead, and check the commitments with them. Every decision is in the audit log." }),
     rows.length ? el("div", { class: "scroll" }, el("table", {}, el("tbody", {}, ...rows))) : el("p", { class: "muted", text: "No programs." }), box);
 }
