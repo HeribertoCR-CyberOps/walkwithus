@@ -291,12 +291,14 @@ test("walk request accepted; callback stored only as ciphertext; expiry = slot +
 
 test("rate limits: 6th request/hour from one IP → 429; 4th/day for one callback → 429", async () => {
   const ip = "198.51.100.7";
-  const mk = (i) => ({ corner_id: 1, date: nyDate(2), time: "09:00", callback: `718-555-01${10 + i}`, consent: true });
+  // Fixed numbers from the 332 block, which no other test uses: walkBody() draws random 718-555-0100..0998 numbers, and a
+  // random draw equal to a number counted here made this test fail in roughly 1 run in 200 (seen once on main, 2026-11-02).
+  const mk = (i) => ({ corner_id: 1, date: nyDate(2), time: "09:00", callback: `332-555-01${10 + i}`, consent: true });
   const codes = [];
   for (let i = 0; i < 6; i++) codes.push((await req("/api/o/crotona-test/walk", { method: "POST", ip, body: mk(i) })).status);
   assert.deepEqual(codes, [201, 201, 201, 201, 201, 429]);
   const c2 = [];
-  for (let i = 0; i < 4; i++) c2.push((await req("/api/o/crotona-test/walk", { method: "POST", body: { ...mk(0), callback: "718-555-0177" } })).status);
+  for (let i = 0; i < 4; i++) c2.push((await req("/api/o/crotona-test/walk", { method: "POST", body: { ...mk(0), callback: "332-555-0177" } })).status);
   assert.deepEqual(c2, [201, 201, 201, 429]);
   assert.equal(sql("SELECT COUNT(*) n FROM rate WHERE k LIKE '%198.51%'")[0].n, 0, "raw IPs never stored");
 });
@@ -464,7 +466,9 @@ test("audit chain verifies; rows cannot be altered or deleted", async () => {
   assert.ok(sqlFails("UPDATE audit SET actor='nobody' WHERE seq=1"), "update blocked");
   assert.ok(sqlFails("DELETE FROM audit WHERE seq=1"), "delete blocked");
   assert.ok(sqlFails("INSERT INTO audit (org_id,ts,actor,action,subject,prev,hash) SELECT org_id,ts,actor,action,subject,prev,'x' FROM audit WHERE seq=1"), "fork blocked");
-  const all = JSON.stringify(sql("SELECT * FROM audit"));
+  // Hashes and keyed-hash names are long hex runs; a random hex string can contain "5550" + 3 digits by chance (a flaky
+  // false positive). They are removed first: a phone number is at most 11 digits and is still caught.
+  const all = JSON.stringify(sql("SELECT actor, action, subject FROM audit")).replace(/[0-9a-f]{16,}/g, "");
   assert.ok(!/5550\d{3}|Rivera|Osei|Diaz|\+1\d{10}/.test(all), "audit holds no personal data");
 });
 
@@ -517,7 +521,7 @@ test("coverage export: admin only, aggregates only, small cells suppressed, rang
   assert.deepEqual(r.j.rows[0], { day: "2025-03-03", corner_id: 1, label: "Crotona Ave & E 173 St", lat: 40.8399, lon: -73.8935,
     adult_minutes: 120, walks_done: 5 }, "exactly the aggregate fields, nothing else");
   assert.ok(!r.j.rows.some(x => x.corner_id === 3), "another org's corner never appears");
-  assert.ok(!/5550|Rivera|Osei|Diaz|@|phone|name_enc|cross_streets/.test(JSON.stringify(r.j)), "no personal data, emails or free text");
+  assert.ok(!/5550\d{3}|Rivera|Osei|Diaz|@|phone|name_enc|cross_streets/.test(JSON.stringify(r.j)), "no personal data, emails or free text");
   assert.equal(sql("SELECT COUNT(*) n FROM audit WHERE action='coverage_exported'")[0].n, auditBefore + 1);
   assert.equal(sql("SELECT subject FROM audit WHERE action='coverage_exported' ORDER BY seq DESC LIMIT 1")[0].subject,
     "range:2025-03-01..2025-03-31|rows:4");
@@ -549,7 +553,7 @@ test("readiness probe reports maintenance and audit status without personal data
   // programs: crotona-test, other-org, no-coord, demo-test, cap-test. Accepting = crotona-test only: cap-test's seeded adults
   // were removed after the ceiling test, other-org has none, no-coord has no coordinator, and demo is never counted.
   assert.deepEqual(r.j.checks.programs, { total: 5, demo: 1, accepting_walks: 1 });
-  assert.ok(!/5550|Rivera|Osei|Diaz|@/.test(JSON.stringify(r.j)), "no personal data or emails in health");
+  assert.ok(!/5550\d{3}|Rivera|Osei|Diaz|@/.test(JSON.stringify(r.j)), "no personal data or emails in health");
 });
 
 test("public schedule is edge-cached and invalidated by admin changes", async () => {
