@@ -32,7 +32,7 @@ export interface Env {
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)
@@ -42,7 +42,7 @@ function log(level: "info" | "warn" | "error", event: string, fields: Record<str
 }
 /** Route template for logs: ids and slugs collapsed so logs carry shape, not identifiers. */
 function routeOf(path: string): string {
-  return path.replace(/\/o\/[a-z0-9-]+/, "/o/:org").replace(/\/c\/(?!(?:me|join|op)(?:\/|$))[a-z0-9-]+/, "/c/:org")
+  return path.replace(/\/o\/[a-z0-9-]+/, "/o/:org").replace(/\/c\/(?!(?:me|join|op)(?:\/|$))[a-z0-9-]+/, "/c/:org").replace(/\/c\/op\/programs\/[a-z0-9-]+/, "/c/op/programs/:org")
     .replace(/\/[0-9a-z]{26}(?=\/|$)/, "/:walk").replace(/\/\d+(?=\/|$)/, "/:id");
 }
 
@@ -91,7 +91,8 @@ async function body<T extends Record<string, unknown>>(req: Request, allowed: re
 const str = (v: unknown, min: number, max: number, code: string): string => {
   if (typeof v !== "string") bad(code);
   const s = v.normalize("NFKC").trim();
-  if (s.length < min || s.length > max || /[\u0000-\u001f\u007f<>]/.test(s)) bad(code);
+  // Control characters, angle brackets and bidirectional overrides/isolates (visual spoofing of names) are refused.
+  if (s.length < min || s.length > max || /[\u0000-\u001f\u007f<>\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(s)) bad(code);
   return s;
 };
 const int = (v: unknown, code: string): number => {
@@ -193,6 +194,8 @@ async function audit(env: Env, orgId: number, actor: string, action: string, sub
         .bind(orgId, ts, actor, action, subject, prev, hash).run();
       return;
     } catch (e) { if (!String(e).includes("UNIQUE")) throw e; }   // a concurrent writer took `prev`; re-read and retry
+    // Jittered backoff so concurrent writers stop colliding on the same `prev` instead of retrying in lockstep.
+    await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 25 * (attempt + 1))));
   }
   throw new HttpError(503, "audit_busy");
 }
@@ -332,6 +335,7 @@ async function volunteerApply(req: Request, env: Env, slug: string): Promise<Res
     // The ceiling is re-checked inside the INSERT itself, so concurrent requests cannot overshoot it.
     `INSERT INTO volunteers (org_id, name_enc, phone_enc, phone_hmac, corners_pref, briefing_ack)
      SELECT ?1,?2,?3,?4,?5,1 WHERE (SELECT COUNT(*) FROM volunteers WHERE org_id=?1 AND created_at>=?6) < ?7
+       AND EXISTS (SELECT 1 FROM orgs WHERE id=?1 AND status='live' AND active=1)
      ON CONFLICT(org_id, phone_hmac) DO NOTHING`)
     .bind(o.id, await seal(env.DATA_KEY, aad("name"), name), await seal(env.DATA_KEY, aad("phone"), ph), phHash,
       JSON.stringify(prefs), since, cap).run();
@@ -447,6 +451,9 @@ async function volunteerApi(req: Request, env: Env, action: string): Promise<Res
 const REVEALS_PER_HOUR = 30;
 const CLOSURE_REASONS: readonly string[] = ["holiday", "recess", "remote_day", "weather", "not_staffed", "other"];
 const CLOSURE_HORIZON_DAYS = 400, MAX_FUTURE_CLOSURES = 120;
+const PENDING_WRITES_PER_HOUR = 60, LIVE_WRITES_PER_HOUR = 600;
+const MAX_CORNERS = 50, MAX_WINDOWS = 300, MAX_COORDINATORS = 50, MAX_PENDING_COORDINATORS = 5;
+const PENDING_EXPIRY_DAYS = 30, DECLINED_SLUG_RELEASE_DAYS = 30;
 /** Weekday expansion of an inclusive date range (school recesses list calendar ranges; weekends never had school). */
 function weekdays(from: string, to: string, reason: string): Array<[string, string]> {
   const out: Array<[string, string]> = [];
@@ -576,6 +583,9 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
   }
 
   if (req.method !== "POST") throw new HttpError(405, "method");
+  // Write ceiling per person: generous for a live program's busy morning, tight for a program still waiting for review
+  // (anyone with a verified email can create one, so its writes must not be able to load the shared database or audit chain).
+  await limit(env, "coord-write", actor, org.status === "pending" ? PENDING_WRITES_PER_HOUR : LIVE_WRITES_PER_HOUR, 3600);
 
   // Closure days. Any coordinator may add or remove one: a snow day or a staffing gap is decided early in the morning.
   if (res === "closures") {
@@ -697,6 +707,8 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
 
   if (res === "corners" && !rid) {
     const b = await body<Record<string, unknown>>(req, ["label", "cross_streets", "lat", "lon"]);
+    const nc = (await env.DB.prepare("SELECT COUNT(*) AS n FROM corners WHERE org_id=? AND active=1").bind(org.id).first<{ n: number }>())?.n ?? 0;
+    if (nc >= MAX_CORNERS) bad("too_many_corners");
     const lat = Number(b.lat), lon = Number(b.lon);
     if (!(lat >= 40.4 && lat <= 41.0 && lon >= -74.3 && lon <= -73.6)) bad("outside_nyc");
     const r = await env.DB.prepare("INSERT INTO corners (org_id, label, cross_streets, lat, lon) VALUES (?,?,?,?,?) RETURNING id")
@@ -716,6 +728,8 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
   }
   if (res === "windows" && !rid) {
     const b = await body<Record<string, unknown>>(req, ["corner_id", "dow", "start", "end"]);
+    const nw = (await env.DB.prepare("SELECT COUNT(*) AS n FROM windows WHERE org_id=?").bind(org.id).first<{ n: number }>())?.n ?? 0;
+    if (nw >= MAX_WINDOWS) bad("too_many_windows");
     const c = await corner(env, org.id, int(b.corner_id, "bad_corner"));
     const dow = Number(b.dow);
     if (!Number.isInteger(dow) || dow < 0 || dow > 6) bad("bad_dow");
@@ -730,11 +744,17 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
   if (res === "windows" && rid && verb === "remove") {
     await body(req, []);
     const wid = int(Number(rid), "bad_id");
-    const r = await env.DB.prepare("DELETE FROM windows WHERE id=? AND org_id=?").bind(wid, org.id).run();
-    if (!r.meta.changes) throw new HttpError(404, "no_window");
+    const win = await env.DB.prepare("SELECT corner_id, dow, start_min, end_min FROM windows WHERE id=? AND org_id=?").bind(wid, org.id)
+      .first<{ corner_id: number; dow: number; start_min: number; end_min: number }>();
+    if (!win) throw new HttpError(404, "no_window");
+    await env.DB.prepare("DELETE FROM windows WHERE id=? AND org_id=?").bind(wid, org.id).run();
     await audit(env, org.id, actor, "window_removed", `window:${wid}`);
     await invalidateOrg(org.slug);
-    return json({ ok: true });
+    // Walks already booked inside the removed hours are kept, and counted, so the coordinator calls those families.
+    const booked = (await env.DB.prepare("SELECT slot_start FROM walk_requests WHERE org_id=? AND corner_id=? AND status IN ('open','assigned') AND slot_start>=?")
+      .bind(org.id, win.corner_id, now - 900).all<{ slot_start: number }>()).results;
+    const walksToCall = booked.filter((w) => { const p = nyParts(w.slot_start); return p.dow === win.dow && p.min >= win.start_min && p.min < win.end_min; }).length;
+    return json({ ok: true, walks_to_call: walksToCall });
   }
   if (res === "coordinators" && (!rid || rid === "remove")) {
     const b = await body<Record<string, unknown>>(req, rid === "remove" ? ["email"] : ["email", "role"]);
@@ -755,6 +775,12 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     }
     const r = b.role === "admin" ? "admin" : "coordinator";
     if (cur?.role === "admin" && r !== "admin" && admins <= 1) bad("last_admin");
+    // Before review, the only admin is the person who signed up: nobody else can be made to look like the program's lead.
+    if (org.status === "pending" && r === "admin") bad("admin_after_review");
+    if (!cur) {
+      const n = (await env.DB.prepare("SELECT COUNT(*) AS n FROM coordinators WHERE org_id=?").bind(org.id).first<{ n: number }>())?.n ?? 0;
+      if (n >= (org.status === "pending" ? MAX_PENDING_COORDINATORS : MAX_COORDINATORS)) bad("too_many_coordinators");
+    }
     await env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,?) ON CONFLICT DO UPDATE SET role=excluded.role")
       .bind(email, org.id, r).run();
     await audit(env, org.id, actor, "coordinator_set", `${target}|${cur?.role ?? "none"}->${r}`);
@@ -791,8 +817,19 @@ export async function purge(env: Env, nowSec = Math.floor(Date.now() / 1000)): P
     env.DB.prepare("DELETE FROM volunteers WHERE status='pending' AND created_at < ?").bind(nowSec - 30 * 86400),
     env.DB.prepare("DELETE FROM closures WHERE day < ?").bind(addDays(nyDate(nowSec), -7)),
   ]);
+  // Sign-ups nobody reviewed within PENDING_EXPIRY_DAYS are closed (the lead may apply again), so a filled queue drains
+  // by itself; and a declined program's web address is released after DECLINED_SLUG_RELEASE_DAYS so it cannot be squatted.
+  const expired = (await env.DB.prepare(
+    "UPDATE orgs SET status='declined', reviewed_at=?1 WHERE status='pending' AND demo=0 AND applied_at < ?2 RETURNING id")
+    .bind(nowSec, nowSec - PENDING_EXPIRY_DAYS * 86400).all<{ id: number }>()).results;
+  for (const o of expired) await audit(env, o.id, "system", "program_expired", "pending->declined");
+  const released = await env.DB.prepare(
+    `UPDATE orgs SET slug = 'x' || id || '-' || substr(slug, 1, 30)
+     WHERE status='declined' AND demo=0 AND COALESCE(reviewed_at, applied_at, created_at) < ? AND slug NOT GLOB 'x[0-9]*-*'`)
+    .bind(nowSec - DECLINED_SLUG_RELEASE_DAYS * 86400).run();
   return { shifts_closed: r[0]!.meta.changes, shifts_purged: r[2]!.meta.changes, walks_purged: r[4]!.meta.changes,
-    rate_purged: r[5]!.meta.changes, stale_applications_purged: r[6]!.meta.changes, closures_purged: r[7]!.meta.changes };
+    rate_purged: r[5]!.meta.changes, stale_applications_purged: r[6]!.meta.changes, closures_purged: r[7]!.meta.changes,
+    programs_expired: expired.length, slugs_released: released.meta.changes };
 }
 
 // ------------------------------------------------------------------ self-healing maintenance (cron)
@@ -952,6 +989,7 @@ async function programJoin(req: Request, env: Env): Promise<Response> {
   if (!id) throw new HttpError(401, "access_required");
   const email = id.email.toLowerCase();
   await limit(env, "join-email", email, 20, 86400);
+  await limit(env, "join-net", clientNet(req), 10, 86400);
   const b = await body<Record<string, unknown>>(req, ["name", "slug", "borough", "org_type", "public_phone", ...JOIN_ACKS]);
   const name = str(b.name, 3, 120, "bad_name");
   const slug = str(b.slug, 3, 40, "bad_slug").toLowerCase();
@@ -962,27 +1000,31 @@ async function programJoin(req: Request, env: Env): Promise<Response> {
   const pub = b.public_phone === undefined || b.public_phone === "" ? null : formatPhone(phone(b.public_phone));
   for (const k of JOIN_ACKS) if (b[k] !== true) bad("commitments_required");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) bad("bad_email");
-  const mine = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=? AND c.role='admin' AND o.status='pending'").bind(email).first<{ n: number }>();
-  if ((mine?.n ?? 0) > 0) throw new HttpError(409, "application_pending");
   const cap = Math.max(1, Number(env.JOIN_PENDING_CAP) || 25);
   const now = Math.floor(Date.now() / 1000);
   let orgId: number;
   try {
-    // The pending ceiling is re-checked inside the INSERT, so a burst of sign-ups cannot overshoot it.
-    const r = await env.DB.prepare(
-      `INSERT INTO orgs (slug, name, borough, public_phone, demo, status, org_type, applied_at)
-       SELECT ?1,?2,?3,?4,0,'pending',?5,?6 WHERE (SELECT COUNT(*) FROM orgs WHERE status='pending') < ?7`)
-      .bind(slug, name, b.borough, pub, b.org_type, now, cap).run();
-    if (!r.meta.changes) throw new HttpError(429, "review_queue_full");
-    orgId = Number(r.meta.last_row_id);
+    // One transaction: the program row (with the queue ceiling checked inside the INSERT) and its lead's admin row are
+    // written together or not at all. "One pending program per lead" is a partial UNIQUE index, so it holds under races.
+    const [r] = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO orgs (slug, name, borough, public_phone, demo, status, org_type, applied_at, applied_by)
+         SELECT ?1,?2,?3,?4,0,'pending',?5,?6,?8 WHERE (SELECT COUNT(*) FROM orgs WHERE status='pending') < ?7`)
+        .bind(slug, name, b.borough, pub, b.org_type, now, cap, email),
+      env.DB.prepare("INSERT INTO coordinators (email, org_id, role) SELECT ?1, id, 'admin' FROM orgs WHERE slug=?2 AND applied_by=?1 AND status='pending'")
+        .bind(email, slug),
+    ]);
+    if (!r!.meta.changes) throw new HttpError(429, "review_queue_full");
+    orgId = Number(r!.meta.last_row_id);
   } catch (e) {
     if (e instanceof HttpError) throw e;
-    if (String(e).includes("UNIQUE")) throw new HttpError(409, "slug_taken");
+    const m = String(e);
+    if (m.includes("UNIQUE") && m.includes("applied_by")) throw new HttpError(409, "application_pending");
+    if (m.includes("UNIQUE")) throw new HttpError(409, "slug_taken");
     throw e;
   }
-  await env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,'admin')").bind(email, orgId).run();
-  await audit(env, orgId, email, "program_applied", `type:${b.org_type}|borough:${b.borough}`);
+  // The audit chain is permanent, and this person has not been vetted: they are recorded by keyed hash, not by email.
+  await audit(env, orgId, "lead:" + (await hmac(env.HMAC_KEY, "email|" + email)).slice(0, 16), "program_applied", `type:${b.org_type}|borough:${b.borough}`);
   return json({ ok: true, slug, status: "pending",
     next: "Your program is saved but not public. Add corners, hours and coordinators now; an operator reviews the organization (typically within 2 business days) and then your public page, volunteer form and walk form open." }, 201);
 }
@@ -995,7 +1037,8 @@ async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Resp
   if (req.method === "GET" && res === "programs" && !slug) {
     const { results } = await env.DB.prepare(
       `SELECT o.slug, o.name, o.borough, o.org_type, o.status, o.public_phone, o.applied_at, o.reviewed_at, o.demo,
-              (SELECT group_concat(email, ', ') FROM coordinators c WHERE c.org_id=o.id AND c.role='admin') AS admins,
+              COALESCE(o.applied_by, (SELECT group_concat(email, ', ') FROM coordinators c WHERE c.org_id=o.id AND c.role='admin')) AS lead,
+              (SELECT group_concat(email || ' (' || role || ')', ', ') FROM coordinators c WHERE c.org_id=o.id AND c.email IS NOT o.applied_by) AS other_coordinators,
               (SELECT COUNT(*) FROM corners c WHERE c.org_id=o.id AND c.active=1) AS corners,
               (SELECT COUNT(*) FROM windows w WHERE w.org_id=o.id) AS windows,
               (SELECT COUNT(*) FROM coordinators c WHERE c.org_id=o.id) AS coordinators
@@ -1003,13 +1046,20 @@ async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Resp
     return json({ programs: results });
   }
   if (req.method === "POST" && res === "programs" && slug && (verb === "approve" || verb === "decline")) {
-    await body(req, []);
+    const b = await body<Record<string, unknown>>(req, ["force"]);
     if (!/^[a-z0-9-]{3,40}$/.test(slug)) throw new HttpError(404, "no_org");
     const o = await env.DB.prepare("SELECT id, slug, status, demo FROM orgs WHERE slug=? AND active=1").bind(slug).first<{ id: number; slug: string; status: string; demo: number }>();
     if (!o) throw new HttpError(404, "no_org");
     if (o.demo === 1) bad("demo_program");
     const to = verb === "approve" ? "live" : "declined";
     if (o.status === to) return json({ ok: true, status: to, changed: false });
+    if (to === "declined" && o.status === "live" && b.force !== true) {
+      // Families were told "a coordinator will call you". Taking the program offline locks its coordinators out, so the
+      // operator must first see how many booked walks would be stranded, and confirm.
+      const w = (await env.DB.prepare("SELECT COUNT(*) AS n FROM walk_requests WHERE org_id=? AND status IN ('open','assigned') AND slot_start>=?")
+        .bind(o.id, Math.floor(Date.now() / 1000) - 900).first<{ n: number }>())?.n ?? 0;
+      if (w > 0) return json({ error: "walks_pending", walks: w }, 409);
+    }
     await env.DB.prepare("UPDATE orgs SET status=?, reviewed_at=? WHERE id=?").bind(to, Math.floor(Date.now() / 1000), o.id).run();
     await audit(env, o.id, id.email, verb === "approve" ? "program_approved" : "program_declined", `${o.status}->${to}`);
     await invalidateOrg(o.slug);
@@ -1040,7 +1090,7 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
     const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
     if (!id) throw new HttpError(401, "access_required");
     const { results } = await env.DB.prepare(
-      "SELECT o.slug, o.name, o.status, c.role FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=? AND o.active=1 AND o.status<>'declined'").bind(id.email).all();
+      "SELECT o.slug, o.name, o.status, c.role, (o.applied_by IS NOT NULL AND o.applied_by = c.email) AS applied FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=? AND o.active=1 AND o.status<>'declined'").bind(id.email).all();
     return json({ email: id.email, orgs: results, operator: isOperator(env, id.email) });
   }
   if (p[1] === "c" && p[2] === "join" && p.length === 3 && req.method === "POST") return await programJoin(req, env);

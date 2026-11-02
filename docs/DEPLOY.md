@@ -31,6 +31,7 @@ Zero Trust → Access → Applications → **Self-hosted**:
 - Policy, choose one:
   - **Invite-only** (default): Allow → the emails (or an Entra/Google group) of your coordinators. New program leads can sign up only after you add their email.
   - **Open sign-up**: Allow → *Everyone*, login method **One-time PIN** (Access emails a code, which proves the person controls that address). Anyone can then start a program, but it stays private until an operator approves it, and the app still admits each person only to the programs they belong to. Keep a separate, stricter Access policy (MFA, short session) for your operators if you can.
+  - **Operators are identified by email.** Only use identity providers that verify the email they assert (Access one-time PIN, Google, Microsoft Entra). Never let a self-service OIDC/SAML provider where users choose their own email claim sign in to this application.
 - Copy the **AUD tag**; set `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) in `wrangler.jsonc` vars; `npx wrangler deploy`.
 - Set `OPERATOR_EMAILS` (comma-separated) to the people who review new programs. Leave it empty and no one can approve sign-ups (existing programs keep working). `JOIN_PENDING_CAP` (default 25) limits how many programs can wait for review at once.
 
