@@ -6,7 +6,8 @@ let L = lang();
 const T = () => tr(L);
 const errText = (err) => (err.code && T().errors[err.code]) || (err.message === "Failed to fetch" ? T().offline : `${T().err} ${err.message}`);
 const q = new URLSearchParams(location.search);
-let state = { org: null, corners: [], windows: [] };
+let state = { org: null, corners: [], windows: [], closures: [] };
+const closedOn = (dateStr) => state.closures.find((c) => c.day === dateStr);
 
 function today(offsetDays = 0) {
   const d = new Date(Date.now() + offsetDays * 86400000);
@@ -60,6 +61,12 @@ function cornersCard() {
   const card = el("section", { class: "card", "aria-labelledby": "ch" }, el("h2", { id: "ch", text: T().corners_h }),
     el("p", { class: "muted", text: T().corners_p }));
   if (!state.corners.length) { card.append(el("p", { text: T().no_corners })); return card; }
+  if (state.closures.length) {
+    const fmtDay = (d) => { const [y, m, dd] = d.split("-").map(Number);
+      try { return new Intl.DateTimeFormat(L, { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(y, m - 1, dd))); } catch { return d; } };
+    card.append(el("div", { class: "result err", role: "note" }, el("strong", { text: T().closures_h }),
+      el("ul", { class: "plain" }, ...state.closures.slice(0, 12).map((c) => el("li", {}, el("span", { class: "nowrap", text: iso(fmtDay(c.day)) }), " — ", T().reasons[c.reason] || T().reasons.other)))));
+  }
   const list = el("ul", { class: "plain" });
   for (const c of state.corners) {
     const ws = state.windows.filter((w) => w.corner_id === c.id);
@@ -91,6 +98,7 @@ function walkCard() {
   const slotsFor = (cid, dateStr) => {
     const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
       .formatToParts(new Date()).map((x) => [x.type, x.value]));
+    if (closedOn(dateStr)) return [];
     const nowMin = dateStr === today() ? +p.hour * 60 + +p.minute : -1, dow = dowOf(dateStr), opts = [];
     for (const w of state.windows.filter((x) => x.corner_id === cid && x.dow === dow))
       for (let m = w.start_min; m < w.end_min; m += 15) if (m >= nowMin) opts.push(hhmm(m));
@@ -103,7 +111,7 @@ function walkCard() {
     if (advance && !slotsFor(cid, date.value).length) { const n = nextOpenDate(cid); if (n) date.value = n; }
     const opts = slotsFor(cid, date.value);
     time.replaceChildren(...(opts.length ? opts.map((t) => el("option", { value: t, text: t }))
-      : [el("option", { value: "", text: T().no_times })]));
+      : [el("option", { value: "", text: closedOn(date.value) ? T().closed_day : T().no_times })]));
   };
   cornerSel.addEventListener("change", () => fillTimes(true)); date.addEventListener("change", () => fillTimes(false)); fillTimes(true);
   const cb = el("input", { type: "tel", id: "w-cb", autocomplete: "tel", inputmode: "tel", required: true });
@@ -194,6 +202,7 @@ function home(real, demo) {
         : el("p", { class: "result err", role: "status", text: T().home_none }),
       demo ? el("p", {}, el("a", { href: "?o=demo", text: T().home_demo })) : null),
     el("section", { class: "card", "aria-labelledby": "ho" }, el("h2", { id: "ho", text: T().home_org_h }), el("p", { text: T().home_org_p }),
+      el("p", {}, el("a", { href: "/c.html", text: T().home_start })),
       el("p", {}, el("a", { href: `mailto:${mail}?subject=Walk%20With%20Us`, dir: "ltr", text: mail }))));
 }
 
@@ -214,7 +223,7 @@ async function render() {
     }
     if (!state.org || state.org.slug !== slug) {
       const d = await api(`/api/o/${encodeURIComponent(slug)}`);
-      state = { org: d.org, corners: d.corners, windows: d.windows, stale: d._cache === "stale", accepting: d.accepting_walks !== false };
+      state = { org: d.org, corners: d.corners, windows: d.windows, closures: Array.isArray(d.closures) ? d.closures : [], stale: d._cache === "stale", accepting: d.accepting_walks !== false };
     }
     document.getElementById("title").textContent = state.org.name;
     document.title = state.org.name;

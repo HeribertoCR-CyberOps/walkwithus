@@ -80,7 +80,7 @@ function writeVars(extra) {
   const jwk = publicKey.export({ format: "jwk" });
   writeFileSync(".dev.vars", [
     `HMAC_KEY=${HKEY}`, `ACCESS_TEAM_DOMAIN=${TEAM}`, `ACCESS_AUD=${AUD}`,
-    `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] })}`, ...extra,
+    `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] })}`, "OPERATOR_EMAILS=ops@maintainer.test", "JOIN_PENDING_CAP=3", ...extra,
   ].join("\n") + "\n");
 }
 async function startServer() {
@@ -627,3 +627,143 @@ test("key rotation drill: cursor reaches every row (batch of 2), legacy-bound ro
   assert.equal(d2.j.unreadable_records, 0, "nothing left unreadable after removing the old key");
 });
 
+
+// ---------------------------------------------------------------- v1.3: a program lead signs up, is reviewed, then recruits
+const LEAD = () => jwt({ email: "lead@newprog.test" }), OPS = () => jwt({ email: "ops@maintainer.test" });
+const joinBody = (o = {}) => ({ name: "Mott Haven Safe Corners", slug: "mott-haven", borough: "Bronx", org_type: "tenant_association",
+  public_phone: "718-555-0177", ack_lead: true, ack_meet_in_person: true, ack_rule_of_two: true, ack_not_emergency: true, ack_coverage: true, ...o });
+test("program sign-up: Access-verified lead, strict input, pending until an operator approves, nothing public before", async () => {
+  assert.equal((await req("/api/c/join", { method: "POST", body: joinBody() })).status, 401, "no Access identity, no sign-up");
+  const me0 = await req("/api/c/me", { token: LEAD() });
+  assert.deepEqual([me0.status, me0.j.orgs, me0.j.operator], [200, [], false]);
+  for (const [o, code] of [[{ ack_rule_of_two: false }, "commitments_required"], [{ ack_coverage: undefined }, "commitments_required"],
+      [{ slug: "join" }, "slug_reserved"], [{ slug: "-mh" }, "bad_slug"], [{ slug: "a--b" }, "bad_slug"], [{ slug: "MH" }, "bad_slug"],
+      [{ borough: "Jersey City" }, "bad_borough"], [{ org_type: "company" }, "bad_org_type"], [{ public_phone: "555" }, "bad_phone"],
+      [{ name: "<b>x</b>" }, "bad_name"]]) {
+    const r = await req("/api/c/join", { method: "POST", token: LEAD(), body: joinBody(o) });
+    assert.deepEqual([r.status, r.j.error], [400, code], JSON.stringify(o));
+  }
+  assert.equal((await req("/api/c/join", { method: "POST", token: LEAD(), body: { ...joinBody(), extra: 1 } })).j.error, "unknown_field:extra");
+  assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/join", { method: "POST", token: LEAD(), body: joinBody({ slug: "crotona-test" }) })), [409, "slug_taken"]);
+  const ok = await req("/api/c/join", { method: "POST", token: LEAD(), body: joinBody() });
+  assert.deepEqual([ok.status, ok.j.slug, ok.j.status], [201, "mott-haven", "pending"], JSON.stringify(ok.j));
+  assert.equal(sql("SELECT public_phone FROM orgs WHERE slug='mott-haven'")[0].public_phone, "(718) 555-0177");
+  assert.equal((await req("/api/c/join", { method: "POST", token: LEAD(), body: joinBody({ slug: "mott-haven-2" }) })).j.error, "application_pending", "one pending program per lead");
+  // Nothing public while pending.
+  assert.equal((await req("/api/o/mott-haven")).status, 404);
+  assert.ok(!(await req("/api/orgs")).j.orgs.some((o) => o.slug === "mott-haven"));
+  assert.equal((await req("/api/o/mott-haven/volunteer", { method: "POST", body: { name: "Early Bird", phone: "917-555-0190", briefing_ack: true } })).status, 404);
+  // The lead prepares the program while it waits.
+  const me = await req("/api/c/me", { token: LEAD() });
+  assert.deepEqual(me.j.orgs, [{ slug: "mott-haven", name: "Mott Haven Safe Corners", status: "pending", role: "admin" }]);
+  const d = await req("/api/c/mott-haven/dashboard", { token: LEAD() });
+  assert.deepEqual([d.status, d.j.org.status, d.j.readiness.accepting_walks], [200, "pending", false]);
+  const c = await req("/api/c/mott-haven/corners", { method: "POST", token: LEAD(), body: { label: "E 138 St & Willis Ave", cross_streets: "by the library", lat: 40.8104, lon: -73.9235 } });
+  assert.equal(c.status, 201);
+  for (let dow = 0; dow < 7; dow++) assert.equal((await req("/api/c/mott-haven/windows", { method: "POST", token: LEAD(), body: { corner_id: c.j.id, dow, start: "00:00", end: "23:45" } })).status, 201);
+  assert.equal((await req("/api/c/mott-haven/dashboard", { token: ADMIN() })).j.error, "not_a_coordinator_for_org", "other programs' admins see nothing");
+  // Operator review.
+  assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/op/programs", { token: ADMIN() })), [403, "operator_only"]);
+  assert.equal((await req("/api/c/op/programs")).status, 401);
+  assert.equal((await req("/api/c/me", { token: OPS() })).j.operator, true);
+  const list = await req("/api/c/op/programs", { token: OPS() });
+  assert.equal(list.j.programs[0].slug, "mott-haven", "pending programs first");
+  assert.deepEqual([list.j.programs[0].status, list.j.programs[0].admins, list.j.programs[0].corners, list.j.programs[0].windows], ["pending", "lead@newprog.test", 1, 7]);
+  assert.equal((await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: LEAD(), body: {} })).status, 403, "a lead cannot approve their own program");
+  assert.equal((await req("/api/c/op/programs/demo-test/approve", { method: "POST", token: OPS(), body: {} })).j.error, "demo_program");
+  const ap = await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} });
+  assert.deepEqual([ap.status, ap.j.status, ap.j.changed], [200, "live", true]);
+  const pub = await req("/api/o/mott-haven");
+  assert.deepEqual([pub.status, pub.j.accepting_walks, pub.j.corners.length], [200, false, 1], "live, but no walks until two adults are approved");
+  assert.deepEqual(sql("SELECT actor, action FROM audit WHERE org_id=(SELECT id FROM orgs WHERE slug='mott-haven') AND action LIKE 'program_%' ORDER BY seq"),
+    [{ actor: "lead@newprog.test", action: "program_applied" }, { actor: "ops@maintainer.test", action: "program_approved" }]);
+});
+
+let mhCorner, mhTok;
+test("live program onboards volunteers end to end: public application → in-person approval → walk accepted", async () => {
+  mhCorner = sql("SELECT id FROM corners WHERE org_id=(SELECT id FROM orgs WHERE slug='mott-haven')")[0].id;
+  for (const [n, ph] of [["Dee Alvarez", "917-555-0181"], ["Eli Brooks", "917-555-0182"]])
+    assert.equal((await req("/api/o/mott-haven/volunteer", { method: "POST", body: { name: n, phone: ph, corners: [mhCorner], briefing_ack: true } })).status, 202);
+  const d = await req("/api/c/mott-haven/dashboard", { token: LEAD() });
+  assert.deepEqual(d.j.volunteers.map((v) => [v.name, v.status]), [["Dee Alvarez", "pending"], ["Eli Brooks", "pending"]]);
+  for (const v of d.j.volunteers) {
+    const a = await req(`/api/c/mott-haven/volunteers/${v.id}/approve`, { method: "POST", token: LEAD(), body: {} });
+    assert.equal(a.status, 200); mhTok = /#t=([A-Za-z0-9_-]{43})$/.exec(a.j.checkin_link)[1];
+  }
+  assert.equal((await req("/api/o/mott-haven")).j.accepting_walks, true, "lead + two approved adults: the walk form opens");
+  const w = await req("/api/o/mott-haven/walk", { method: "POST", body: walkBody(mhCorner) });
+  assert.equal(w.status, 201, JSON.stringify(w.j));
+  assert.equal((await req("/api/v/me", { method: "POST", body: { token: mhTok } })).status, 200);
+});
+
+test("closures: any coordinator sets a day off; families see it; walks that day are refused; presets come from the official calendar", async () => {
+  const day = nyDate(2), C = (b, t = LEAD()) => req("/api/c/mott-haven/closures", { method: "POST", token: t, body: b });
+  for (const [b, code] of [[{ day: "2026-02-30", reason: "weather" }, "bad_day"], [{ day: nyDate(-1), reason: "weather" }, "day_out_of_range"],
+      [{ day: nyDate(500), reason: "weather" }, "day_out_of_range"], [{ day, reason: "because" }, "bad_reason"], [{ day, reason: "weather", note: "x" }, "unknown_field:note"]]) {
+    const r = await C(b); assert.deepEqual([r.status, r.j.error], [400, code], JSON.stringify(b));
+  }
+  assert.equal((await C({ day, reason: "weather" }, ADMIN())).j.error, "not_a_coordinator_for_org");
+  const pre = await req("/api/o/mott-haven/walk", { method: "POST", body: { ...walkBody(mhCorner), date: day } });
+  assert.equal(pre.status, 201, "a walk requested before the closure exists…");
+  const s = await C({ day, reason: "weather" });
+  assert.deepEqual([s.status, s.j.walks_to_call], [201, 1], "…is reported so the coordinator calls that family");
+  const pub = await req("/api/o/mott-haven");
+  assert.deepEqual(pub.j.closures, [{ day, reason: "weather" }], "public schedule shows it (cache invalidated)");
+  const refused = await req("/api/o/mott-haven/walk", { method: "POST", body: { ...walkBody(mhCorner), date: day } });
+  assert.deepEqual([refused.status, refused.j.error], [409, "closed_that_day"]);
+  assert.equal((await req("/api/o/mott-haven/walk", { method: "POST", body: walkBody(mhCorner) })).status, 201, "other days unaffected");
+  assert.equal((await C({ day, reason: "not_staffed" })).j.changed, 1, "re-setting a day updates its reason");
+  const dash = await req("/api/c/mott-haven/dashboard", { token: LEAD() });
+  const cl = dash.j.closures.find((x) => x.day === day);
+  assert.equal(cl.reason, "not_staffed");
+  assert.equal((await req(`/api/c/mott-haven/closures/${cl.id}/remove`, { method: "POST", token: LEAD(), body: {} })).status, 200);
+  assert.equal((await req(`/api/c/mott-haven/closures/${cl.id}/remove`, { method: "POST", token: LEAD(), body: {} })).j.error, "no_closure");
+  assert.equal((await req("/api/o/mott-haven/walk", { method: "POST", body: { ...walkBody(mhCorner), date: day } })).status, 201, "open again after removal");
+  // Preset: official NYC Public Schools 2026-27 full-closure days, only from today forward, idempotent.
+  assert.equal((await req("/api/c/mott-haven/closures/preset", { method: "POST", token: LEAD(), body: { preset: "nyc-2099" } })).j.error, "bad_preset");
+  const p1 = await req("/api/c/mott-haven/closures/preset", { method: "POST", token: LEAD(), body: { preset: "nyc-public-schools-2026-27" } });
+  assert.equal(p1.status, 201); assert.match(p1.j.source, /^https:\/\/www\.schools\.nyc\.gov\//); assert.equal(p1.j.not_included.length, 4);
+  const today = nyDate(0);
+  const all = ["2026-09-21","2026-10-12","2026-11-03","2026-11-11","2026-11-26","2026-11-27","2026-12-24","2026-12-25","2026-12-28","2026-12-29","2026-12-30",
+    "2026-12-31","2027-01-01","2027-01-18","2027-02-15","2027-02-16","2027-02-17","2027-02-18","2027-02-19","2027-03-09","2027-03-26","2027-04-22","2027-04-23",
+    "2027-04-26","2027-04-27","2027-04-28","2027-04-29","2027-04-30","2027-05-17","2027-05-31","2027-06-10"];
+  const expected = all.filter((x) => x >= today && x <= nyDate(400));
+  assert.equal(p1.j.added, expected.length, "weekday expansion of every recess, nothing in the past");
+  assert.deepEqual((await req("/api/c/mott-haven/dashboard", { token: LEAD() })).j.closures.map((x) => x.day), expected);
+  const p2 = await req("/api/c/mott-haven/closures/preset", { method: "POST", token: LEAD(), body: { preset: "nyc-public-schools-2026-27" } });
+  assert.deepEqual([p2.j.added, p2.j.skipped_existing], [0, expected.length], "running it twice changes nothing");
+  // Retention: closures more than 7 days old are purged by maintenance.
+  const org = sql("SELECT id FROM orgs WHERE slug='mott-haven'")[0].id;
+  sql(`INSERT INTO closures (org_id, day, reason) VALUES (${org}, '${nyDate(-10)}', 'holiday'), (${org}, '${nyDate(-3)}', 'holiday')`);
+  assert.equal((await fetch(BASE + "/__scheduled?cron=17+*+*+*+*", { headers: { connection: "close" } })).status, 200);
+  assert.deepEqual(sql(`SELECT day FROM closures WHERE org_id=${org} AND day < '${today}' ORDER BY day`).map((r) => r.day), [nyDate(-3)]);
+});
+
+test("schedule edits: admins see and remove coverage windows; coordinators cannot; families see the change", async () => {
+  const d = await req("/api/c/crotona-test/dashboard", { token: ADMIN() });
+  const w = d.j.windows.find((x) => x.corner_id === 2);
+  assert.ok(w && Number.isInteger(w.id) && "dow" in w && "start_min" in w);
+  assert.deepEqual(((r) => [r.status, r.j.error])(await req(`/api/c/crotona-test/windows/${w.id}/remove`, { method: "POST", token: COORD(), body: {} })), [403, "admin_only"]);
+  assert.equal((await req(`/api/c/cap-test/windows/${w.id}/remove`, { method: "POST", token: jwt({ email: "cap@org.test" }), body: {} })).j.error, "no_window", "another program's admin cannot remove it");
+  assert.equal((await req(`/api/c/crotona-test/windows/${w.id}/remove`, { method: "POST", token: ADMIN(), body: {} })).status, 200);
+  const same = (list) => list.filter((x) => x.corner_id === w.corner_id && x.dow === w.dow && x.start_min === w.start_min && x.end_min === w.end_min).length;
+  assert.equal(same((await req("/api/o/crotona-test")).j.windows), same(d.j.windows) - 1, "public schedule updated at once");
+  assert.equal(sql(`SELECT COUNT(*) n FROM audit WHERE action='window_removed' AND subject='window:${w.id}'`)[0].n, 1);
+});
+
+test("operator decline: program disappears, its links stop, its lead cannot open it; sign-up queue is capped", async () => {
+  const dec = await req("/api/c/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: {} });
+  assert.deepEqual([dec.status, dec.j.status], [200, "declined"]);
+  assert.equal((await req("/api/o/mott-haven")).status, 404);
+  assert.equal((await req("/api/v/me", { method: "POST", body: { token: mhTok } })).status, 401, "volunteer links stop with the program");
+  assert.equal((await req("/api/c/mott-haven/dashboard", { token: LEAD() })).status, 404);
+  assert.deepEqual((await req("/api/c/me", { token: LEAD() })).j.orgs, []);
+  assert.equal((await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} })).j.status, "live", "an operator can reverse it");
+  assert.equal((await req("/api/v/me", { method: "POST", body: { token: mhTok } })).status, 200);
+  // JOIN_PENDING_CAP=3 in this test run: the 4th waiting program is refused until one is reviewed.
+  for (let i = 1; i <= 3; i++) assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: `l${i}@q.test` }), body: joinBody({ slug: `queue-${i}` }) })).status, 201);
+  assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/join", { method: "POST", token: jwt({ email: "l4@q.test" }), body: joinBody({ slug: "queue-4" }) })), [429, "review_queue_full"]);
+  assert.equal((await req("/api/c/op/programs/queue-1/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
+  assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "l4@q.test" }), body: joinBody({ slug: "queue-4" }) })).status, 201);
+  assert.equal((await req("/api/health/ready")).j.checks.programs.total, 6, "the probe counts live programs only (5 seeded + mott-haven)");
+});

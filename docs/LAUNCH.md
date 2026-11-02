@@ -20,6 +20,7 @@ A deployment is ready for families when every box is checked. Roles: **maintaine
 - [ ] A Workers plan whose D1 limits cover the expected traffic (`docs/SLO.md`) [operator]
 - [ ] External monitor from independent infrastructure (`scripts/monitor.mjs`, `docs/SLO.md`) [operator]
 - [ ] Access policy for coordinators requires MFA and a session of 12 h or less [operator]
+- [ ] Sign-up mode chosen (invite-only or open one-time-PIN sign-up) and `OPERATOR_EMAILS` set to the people who review programs (`docs/DEPLOY.md` §3) [operator]
 - [ ] Demo program seeded and labelled "Demo — not a live program" [operator]
 - [ ] Smoke test on the live URL from an iPhone and an Android phone: request, volunteer and coordinator flows, 911 link [operator]
 - [ ] Turnstile decision: on (adds a Cloudflare script/frame; CSP must be widened) or off (rate limits only) [operator]

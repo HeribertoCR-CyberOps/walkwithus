@@ -41,4 +41,10 @@ Your organization controls its program's data. Family callback numbers are delet
 
 ## Getting started
 
-Reply with: your organization's name, a lead contact, the school(s) and neighborhood you serve, and two or three corners you could staff first. We can have your page live within a day of that call.
+1. **Sign up online.** Open the coordinator page (`/c.html`), sign in with your organization's email, and fill in *Start a Walk With Us program*. Your program is saved privately.
+2. **Prepare while we review.** Add your corners, hours, coordinators and closure days (one button adds the official NYC Public Schools 2026-27 days off). Nothing is public yet.
+3. **Review.** A maintainer checks that your organization is real and talks with your lead, typically within 2 business days. Then your public page and volunteer form open.
+4. **Recruit.** Share your page (print it as a QR code). Volunteers apply there; you meet each one in person, brief them, and approve them in the dashboard, which gives each a personal check-in link.
+5. **Open walks.** Once you have a coordinator and two approved adults, families can request walks.
+
+Prefer to talk first? Write with your organization's name, a lead contact, the school(s) and neighborhood you serve, and two or three corners you could staff. We can have your page live within a day of that call.

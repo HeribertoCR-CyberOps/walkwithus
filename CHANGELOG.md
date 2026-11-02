@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.0 — 2026-11-02
+**Program leads can start a program themselves, safely; programs can close days; schedules can be corrected.**
+- **Sign-up for program leads.**
+  - A lead signs in through Cloudflare Access (verified email) at `/c.html` and submits *Start a Walk With Us program*: name, web address, borough, organization type, optional program phone and five commitments (named lead, volunteers met in person, Rule of Two, not an emergency service, liability coverage or fiscal sponsor).
+  - The program is created **pending**. The lead can prepare corners, hours, coordinators and closure days, but there is no public page, volunteer form or walk form until an **operator** (`OPERATOR_EMAILS`) reviews the organization and approves it.
+  - Decline or take-offline stops the public page and every volunteer link at once, and can be reversed. Every decision is audited.
+  - Limits: one pending program per lead, at most `JOIN_PENDING_CAP` (default 25) waiting at once, 20 attempts per email per day, reserved web addresses.
+- **Volunteer onboarding unchanged and now reachable end to end:** sign-up → operator approval → public volunteer form → in-person approval → personal check-in link → walk form opens with a coordinator and two approved adults (tested as one flow).
+- **Closure days.**
+  - Any coordinator can mark a date closed (school holiday, recess, remote day, weather, not enough adults, other; no free text). Families see the next 60 days of closures on the program page, the walk form offers no times that day, and the server refuses walks on it (`closed_that_day`).
+  - Walks already requested for a newly closed day are counted, so the coordinator calls those families.
+  - One button adds the official **NYC Public Schools 2026-27** no-attendance days, from today on. Partial days and early dismissals are listed for the program to decide, not added.
+  - Closures older than 7 days are purged.
+- **Schedule corrections:** admins see every published hour block and can remove one; the public schedule updates at once.
+- **Coordinator page:** the 60-second refresh no longer wipes a form while someone is typing in it.
+- Pending and declined programs are excluded from `/api/orgs`, the public page, the volunteer form and the readiness probe's counts.
+- Strings for closures in all 11 page languages (machine-drafted outside English, as before).
+- **Upgrade order:** apply migration `0004` **before** deploying this version. The migration only adds columns and a table, so 1.2.0 keeps running on the migrated database. Then set `OPERATOR_EMAILS` and choose the Access sign-up mode (`docs/DEPLOY.md` §3).
+- Tests: e2e 35 (5 new: sign-up and review, end-to-end onboarding, closures and preset, schedule edits, decline and queue cap). Browser: 3 new checks (closure display and booking block, lead sign-up to pending dashboard, operator review), Chromium and WebKit.
+
 ## 1.2.0 — 2026-11-01
 **Programs can measure outcomes with public data, without collecting anything new.**
 - New admin-only `GET /api/c/:slug/coverage?from=&to=`: anonymous per-corner, per-day adult-minutes and completed walks, read only from the aggregate the 72-hour purge leaves behind. Days with 1–2 walks are suppressed. Coordinators cannot export. Every export is audited (`coverage_exported`). Ranges are validated and capped at 731 days.

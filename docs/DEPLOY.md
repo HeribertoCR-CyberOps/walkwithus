@@ -28,12 +28,19 @@ Built in, nothing to configure: per-network rate limits (IPv4 address or IPv6 /6
 Zero Trust → Access → Applications → **Self-hosted**:
 - Name `walkwithus-coordinators`
 - Domains: `<host>/c.html` and `<host>/api/c/*`
-- Policy: Allow → emails (or an Entra/Google group) of your coordinators
+- Policy, choose one:
+  - **Invite-only** (default): Allow → the emails (or an Entra/Google group) of your coordinators. New program leads can sign up only after you add their email.
+  - **Open sign-up**: Allow → *Everyone*, login method **One-time PIN** (Access emails a code, which proves the person controls that address). Anyone can then start a program, but it stays private until an operator approves it, and the app still admits each person only to the programs they belong to. Keep a separate, stricter Access policy (MFA, short session) for your operators if you can.
 - Copy the **AUD tag**; set `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) in `wrangler.jsonc` vars; `npx wrangler deploy`.
+- Set `OPERATOR_EMAILS` (comma-separated) to the people who review new programs. Leave it empty and no one can approve sign-ups (existing programs keep working). `JOIN_PENDING_CAP` (default 25) limits how many programs can wait for review at once.
 
 The Worker verifies the Access JWT itself (RS256, issuer, audience, expiry, key id) — Access in front plus verification behind.
 
-## 4. Seed an organization
+## 4. Add an organization
+
+**Self-serve (v1.3):** the lead opens `/c.html`, signs in through Access, fills in **Start a Walk With Us program** (name, web address, borough, organization type, optional program phone, five commitments) and submits. The program is created as *pending*: the lead can add corners, hours, closure days and coordinators, but nothing is public. An operator opens `/c.html`, sees **Operator: program review**, verifies the organization (website, EIN or fiscal-sponsor letter, a call with the lead) and presses **Approve**. The public page, volunteer form and walk form open at once; the walk form still waits for two approved adults. **Decline / Take offline** closes the program and stops its volunteer links immediately; it can be reversed.
+
+**By hand (operator):**
 
 ```bash
 npx wrangler d1 execute walkwithus --remote --command "
