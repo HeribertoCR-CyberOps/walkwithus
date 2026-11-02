@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.1 — 2026-11-02
+**Hardening of program sign-up after an independent security review.** No change for families or volunteers.
+- **Sign-up identity.**
+  - The person who signs a program up is recorded on the program (`applied_by`, migration `0005`). Reviewers see that person as the lead, and people the lead added are listed separately as unverified.
+  - The migration backfills `applied_by` only for a pending program with exactly one admin. Where there are several, it stays empty and the reviewer is told "not recorded", rather than shown a guess (code-scanning finding on PR #18).
+  - Before review, nobody else can be made an admin. A lead can no longer list a real, trusted person as an admin to mislead the reviewer, nor block that person from starting their own program.
+  - "One pending program per lead" is a unique index, and the program and its lead are written in one transaction, so concurrent requests cannot get around either.
+- **Abuse limits.**
+  - Coordinator writes are capped per person per hour: 60 while a program waits for review, 600 when live.
+  - Per program: 50 corners, 300 hour blocks, 50 coordinators (5 before review).
+  - Sign-up attempts: 10 per network per day.
+  - The audit chain retries with jittered backoff under contention.
+- **The queue drains itself.** A sign-up nobody reviews in 30 days is closed (the lead can apply again), and a declined program's web address is released after 30 days.
+- **No family is stranded.**
+  - Taking a live program offline while walks are booked needs an explicit confirmation showing how many, so the lead can be told to call those families first.
+  - Removing hours reports walks already booked in them.
+  - A volunteer application racing a decline can no longer land in a declined program.
+- **Privacy.**
+  - Unvetted applicants appear in the permanent audit chain only as a keyed hash.
+  - Program names reject bidirectional-override characters, which could be used for visual spoofing.
+  - Operator-review log lines no longer carry the program's web address.
+- Checked again against the official PDF: the NYC Public Schools 2026-27 preset is correct, including June 10, 2027 (Anniversary Day; students do not attend).
+- Tests: e2e 36 (1 new, covering all of the above). New migration tests, run in CI: every migration applies in order on an empty database, and the `0005` backfill and uniqueness rules are checked on fixture rows. The test fails against the first version of the backfill.
+
 ## 1.3.0 — 2026-11-02
 **Program leads can start a program themselves, safely; programs can close days; schedules can be corrected.**
 - **Sign-up for program leads.**

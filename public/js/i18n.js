@@ -31,7 +31,7 @@ export async function api(path, method = "GET", body) {
   if (!r.ok) {
     // Cloudflare's own bot check answers with an HTML page and cf-mitigated; code cannot solve it, a page reload can.
     const code = d.error || (r.headers.get("cf-mitigated") ? "edge_challenge" : undefined);
-    const e = new Error(code || ("HTTP " + r.status)); e.code = code; e.status = r.status; throw e;
+    const e = new Error(code || ("HTTP " + r.status)); e.code = code; e.status = r.status; e.data = d; throw e;
   }
   Object.defineProperty(d, "_cache", { value: r.headers.get("x-cache"), enumerable: false });
   return d;

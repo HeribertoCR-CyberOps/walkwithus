@@ -12,7 +12,15 @@ let slug = qSlug && SLUG.test(qSlug) ? qSlug : null;
 let D = null;
 
 function note(box, ok, ...n) { box.className = "result " + (ok ? "ok" : "err"); box.replaceChildren(...n); }
-async function act(box, fn) { try { await fn(); } catch (e) { note(box, false, "Error: " + e.message); } }
+const ERR = {
+  admin_after_review: "Until the program is reviewed, only the person who signed it up can be an admin. Add this person as a coordinator now; make them an admin after review.",
+  too_many_coordinators: "This program has reached its coordinator limit (5 before review, 50 after).",
+  too_many_corners: "This program has reached its limit of 50 active corners.", too_many_windows: "This program has reached its limit of 300 published hour blocks.",
+  rate_limited: "Too many changes in the last hour. Please wait and try again.", application_pending: "You already have a program waiting for review.",
+  slug_taken: "That web address is taken. Choose another.", slug_reserved: "That web address is reserved. Choose another.",
+  commitments_required: "Please confirm all five commitments.", review_queue_full: "The review queue is full right now. Please try again in a few days or write to the maintainers.",
+};
+async function act(box, fn) { try { await fn(); } catch (e) { note(box, false, ERR[e.code] || "Error: " + e.message); } }
 
 // Program status: is the public walk form open, and how close is today's traffic to the daily ceilings?
 function statusSection() {
@@ -141,7 +149,9 @@ function windowsList(box) {
     el("td", { text: label(w.corner_id) }), el("td", { text: days[w.dow] }), el("td", { text: `${hhmm(w.start_min)}–${hhmm(w.end_min)}` }),
     el("td", {}, el("button", { class: "secondary", text: "Remove", onclick: () => act(box, async () => {
       if (!confirm(`Remove ${label(w.corner_id)} ${days[w.dow]} ${hhmm(w.start_min)}–${hhmm(w.end_min)} from the public schedule?`)) return;
-      await api(`/api/c/${slug}/windows/${w.id}/remove`, "POST", {}); load(); }) })))))));
+      const r = await api(`/api/c/${slug}/windows/${w.id}/remove`, "POST", {});
+      if (r.walks_to_call) { note(box, false, `Removed. ${r.walks_to_call} walk request${r.walks_to_call === 1 ? " was" : "s were"} already booked in those hours: call ${r.walks_to_call === 1 ? "that family" : "those families"}.`); setTimeout(load, 5000); }
+      else load(); }) })))))));
 }
 
 function adminSection() {
@@ -211,7 +221,8 @@ async function operatorSection() {
   const when = (t) => (t ? new Date(t * 1000).toLocaleDateString() : "—");
   const rows = programs.filter((p) => !p.demo).map((p) => el("tr", {},
     el("td", {}, el("strong", { text: p.name }), el("div", { class: "muted", text: `${p.slug} · ${p.borough || "—"} · ${p.org_type || "—"}` }),
-      el("div", { class: "muted", text: `Lead: ${p.admins || "—"}${p.public_phone ? " · " + p.public_phone : ""}` })),
+      el("div", { class: p.lead ? "muted" : "result err", text: `Signed up by: ${p.lead || "not recorded (set up by hand or before v1.3.1): verify who leads it"}${p.public_phone ? " · " + p.public_phone : ""}` }),
+      p.other_coordinators ? el("div", { class: "muted", text: `${p.lead ? "Added by the lead (not verified)" : "Coordinators"}: ${p.other_coordinators}` }) : null),
     el("td", {}, el("span", { class: "badge " + (p.status === "live" ? "ok" : p.status === "pending" ? "warn" : ""), text: p.status }),
       el("div", { class: "muted", text: `applied ${when(p.applied_at)} · reviewed ${when(p.reviewed_at)}` }),
       el("div", { class: "muted", text: `${p.corners} corners · ${p.windows} hours · ${p.coordinators} coordinators` })),
@@ -220,8 +231,15 @@ async function operatorSection() {
         if (!confirm(`Set ${p.name} live? Confirm you verified the organization and spoke with its lead.`)) return;
         await api(`/api/c/op/programs/${encodeURIComponent(p.slug)}/approve`, "POST", {}); load(); }) }) : null,
       p.status !== "declined" ? el("button", { class: "danger", text: p.status === "live" ? "Take offline" : "Decline", onclick: () => act(box, async () => {
-        if (!confirm(`${p.status === "live" ? "Take" : "Decline"} ${p.name}? Its public page and volunteer links stop immediately.`)) return;
-        await api(`/api/c/op/programs/${encodeURIComponent(p.slug)}/decline`, "POST", {}); load(); }) }) : null))));
+        if (!confirm(`${p.status === "live" ? "Take" : "Decline"} ${p.name}? Its public page closes within a minute and its volunteer links stop at once.`)) return;
+        const url = `/api/c/op/programs/${encodeURIComponent(p.slug)}/decline`;
+        try { await api(url, "POST", {}); }
+        catch (e) {
+          if (e.code !== "walks_pending") throw e;
+          if (!confirm(`${p.name} has ${e.data.walks} booked walk request${e.data.walks === 1 ? "" : "s"}. Its coordinators will lose access to the callback numbers. Call the lead first so those families are called. Take it offline anyway?`)) return;
+          await api(url, "POST", { force: true });
+        }
+        load(); }) }) : null))));
   const pending = programs.filter((p) => p.status === "pending").length;
   return el("section", { class: "card", "aria-labelledby": "oph" }, el("h2", { id: "oph", text: `Operator: program review (${pending} waiting)` }),
     el("p", { class: "muted", text: "Before approving: confirm the organization exists (website, EIN or sponsor letter), speak with the lead, and check the commitments with them. Every decision is in the audit log." }),
@@ -239,7 +257,7 @@ async function load() {
         if (me.operator) parts.push(await operatorSection());
         if (me.orgs.length) parts.push(el("section", { class: "card" }, el("h2", { text: "Your programs" }),
           el("ul", { class: "plain" }, ...me.orgs.map((o) => el("li", {}, el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: `${o.name} (${o.role}${o.status === "pending" ? ", waiting for review" : ""})` }))))));
-        if (!me.orgs.some((o) => o.status === "pending" && o.role === "admin")) parts.push(joinSection(me));
+        if (!me.orgs.some((o) => o.status === "pending" && o.applied)) parts.push(joinSection(me));
         content.replaceChildren(...parts); return;
       }
     }

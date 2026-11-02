@@ -655,7 +655,7 @@ test("program sign-up: Access-verified lead, strict input, pending until an oper
   assert.equal((await req("/api/o/mott-haven/volunteer", { method: "POST", body: { name: "Early Bird", phone: "917-555-0190", briefing_ack: true } })).status, 404);
   // The lead prepares the program while it waits.
   const me = await req("/api/c/me", { token: LEAD() });
-  assert.deepEqual(me.j.orgs, [{ slug: "mott-haven", name: "Mott Haven Safe Corners", status: "pending", role: "admin" }]);
+  assert.deepEqual(me.j.orgs, [{ slug: "mott-haven", name: "Mott Haven Safe Corners", status: "pending", role: "admin", applied: 1 }]);
   const d = await req("/api/c/mott-haven/dashboard", { token: LEAD() });
   assert.deepEqual([d.status, d.j.org.status, d.j.readiness.accepting_walks], [200, "pending", false]);
   const c = await req("/api/c/mott-haven/corners", { method: "POST", token: LEAD(), body: { label: "E 138 St & Willis Ave", cross_streets: "by the library", lat: 40.8104, lon: -73.9235 } });
@@ -668,15 +668,18 @@ test("program sign-up: Access-verified lead, strict input, pending until an oper
   assert.equal((await req("/api/c/me", { token: OPS() })).j.operator, true);
   const list = await req("/api/c/op/programs", { token: OPS() });
   assert.equal(list.j.programs[0].slug, "mott-haven", "pending programs first");
-  assert.deepEqual([list.j.programs[0].status, list.j.programs[0].admins, list.j.programs[0].corners, list.j.programs[0].windows], ["pending", "lead@newprog.test", 1, 7]);
+  assert.deepEqual([list.j.programs[0].status, list.j.programs[0].lead, list.j.programs[0].corners, list.j.programs[0].windows], ["pending", "lead@newprog.test", 1, 7]);
   assert.equal((await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: LEAD(), body: {} })).status, 403, "a lead cannot approve their own program");
   assert.equal((await req("/api/c/op/programs/demo-test/approve", { method: "POST", token: OPS(), body: {} })).j.error, "demo_program");
   const ap = await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} });
   assert.deepEqual([ap.status, ap.j.status, ap.j.changed], [200, "live", true]);
   const pub = await req("/api/o/mott-haven");
   assert.deepEqual([pub.status, pub.j.accepting_walks, pub.j.corners.length], [200, false, 1], "live, but no walks until two adults are approved");
-  assert.deepEqual(sql("SELECT actor, action FROM audit WHERE org_id=(SELECT id FROM orgs WHERE slug='mott-haven') AND action LIKE 'program_%' ORDER BY seq"),
-    [{ actor: "lead@newprog.test", action: "program_applied" }, { actor: "ops@maintainer.test", action: "program_approved" }]);
+  const progAudit = sql("SELECT actor, action FROM audit WHERE org_id=(SELECT id FROM orgs WHERE slug='mott-haven') AND action LIKE 'program_%' ORDER BY seq");
+  assert.equal(progAudit.length, 2);
+  assert.match(progAudit[0].actor, /^lead:[0-9a-f]{16}$/, "an unvetted applicant is recorded by keyed hash, never by email");
+  assert.deepEqual(progAudit.map((x) => x.action), ["program_applied", "program_approved"]);
+  assert.equal(progAudit[1].actor, "ops@maintainer.test");
 });
 
 let mhCorner, mhTok;
@@ -752,7 +755,11 @@ test("schedule edits: admins see and remove coverage windows; coordinators canno
 });
 
 test("operator decline: program disappears, its links stop, its lead cannot open it; sign-up queue is capped", async () => {
-  const dec = await req("/api/c/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: {} });
+  const held = await req("/api/c/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: {} });
+  assert.deepEqual([held.status, held.j.error], [409, "walks_pending"], "a live program with booked walks is not taken offline blindly");
+  assert.ok(held.j.walks >= 1);
+  assert.equal(sql("SELECT status FROM orgs WHERE slug='mott-haven'")[0].status, "live");
+  const dec = await req("/api/c/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: { force: true } });
   assert.deepEqual([dec.status, dec.j.status], [200, "declined"]);
   assert.equal((await req("/api/o/mott-haven")).status, 404);
   assert.equal((await req("/api/v/me", { method: "POST", body: { token: mhTok } })).status, 401, "volunteer links stop with the program");
@@ -766,4 +773,48 @@ test("operator decline: program disappears, its links stop, its lead cannot open
   assert.equal((await req("/api/c/op/programs/queue-1/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
   assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "l4@q.test" }), body: joinBody({ slug: "queue-4" }) })).status, 201);
   assert.equal((await req("/api/health/ready")).j.checks.programs.total, 6, "the probe counts live programs only (5 seeded + mott-haven)");
+});
+
+test("v1.3.1 hardening: sign-up identity, pending limits, booked-walk notices, self-draining queue", async () => {
+  // Bidirectional overrides cannot be used to spoof a program name.
+  assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "bidi@q.test" }), body: joinBody({ slug: "bidi-x", name: "Safe \u202eSKRAW" }) })).j.error, "bad_name");
+  assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "bidi@q.test" }), body: joinBody({ slug: "x12-bronx" }) })).j.error, "slug_reserved", "the released-address form is reserved");
+  // A pending program's lead cannot make anyone else an admin (nobody can be made to look like its lead) …
+  const L2 = () => jwt({ email: "l2@q.test" });
+  assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: "victim@x.test", role: "admin" } })), [400, "admin_after_review"]);
+  assert.equal((await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: "victim@x.test", role: "coordinator" } })).status, 200);
+  // … and being listed on someone else's pending program does not stop that person from starting their own.
+  assert.equal((await req("/api/c/op/programs/queue-3/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
+  const own = await req("/api/c/join", { method: "POST", token: jwt({ email: "victim@x.test" }), body: joinBody({ slug: "victim-own" }) });
+  assert.equal(own.status, 201, JSON.stringify(own.j));
+  const me = await req("/api/c/me", { token: jwt({ email: "victim@x.test" }) });
+  assert.deepEqual(me.j.orgs.map((o) => [o.slug, o.role, o.applied]).sort(), [["queue-2", "coordinator", 0], ["victim-own", "admin", 1]]);
+  const q2 = (await req("/api/c/op/programs", { token: OPS() })).j.programs.find((x) => x.slug === "queue-2");
+  assert.deepEqual([q2.lead, q2.other_coordinators], ["l2@q.test", "victim@x.test (coordinator)"], "the reviewer sees who signed up, separately from people the lead added");
+  // Pending programs: at most 5 people.
+  for (const n of [3, 4, 5]) assert.equal((await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: `c${n}@q.test`, role: "coordinator" } })).status, 200);
+  assert.equal((await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: "c6@q.test", role: "coordinator" } })).j.error, "too_many_coordinators");
+  // Pending programs: at most 60 changes per person per hour (a free sign-up cannot load the shared database).
+  let n = 0, last;
+  do { last = await req("/api/c/queue-2/closures", { method: "POST", token: L2(), body: { day: nyDate(3), reason: "weather" } }); n++; } while (last.status !== 429 && n < 70);
+  assert.deepEqual([last.status, last.j.error], [429, "rate_limited"]); assert.ok(n <= 60, `stopped after ${n}`);
+  // Per-network sign-up ceiling: 10 attempts a day from one network, whatever the email.
+  const ip = "198.51.100.77"; let r;
+  for (let i = 0; i < 11; i++) r = await req("/api/c/join", { method: "POST", ip, token: jwt({ email: `net${i}@q.test` }), body: joinBody({ slug: `net-${i}`, ack_lead: false }) });
+  assert.deepEqual([r.status, r.j.error], [429, "rate_limited"]);
+  // Removing hours that already have a booked walk tells the coordinator to call that family.
+  assert.equal((await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} })).j.status, "live");
+  const dow = new Date(nyDate(1) + "T12:00:00Z").getUTCDay();
+  const win = (await req("/api/c/mott-haven/dashboard", { token: LEAD() })).j.windows.find((w) => w.dow === dow);
+  const rm = await req(`/api/c/mott-haven/windows/${win.id}/remove`, { method: "POST", token: LEAD(), body: {} });
+  assert.equal(rm.status, 200); assert.ok(rm.j.walks_to_call >= 1, JSON.stringify(rm.j));
+  // The queue drains by itself: a sign-up nobody reviewed in 30 days is closed, and a declined program's address is released.
+  sql(`UPDATE orgs SET applied_at = unixepoch() - 31*86400 WHERE slug='queue-2'`);
+  sql(`UPDATE orgs SET reviewed_at = unixepoch() - 31*86400 WHERE slug='queue-1'`);
+  const q1id = sql("SELECT id FROM orgs WHERE slug='queue-1'")[0].id;
+  assert.equal((await fetch(BASE + "/__scheduled?cron=17+*+*+*+*", { headers: { connection: "close" } })).status, 200);
+  assert.equal(sql("SELECT status FROM orgs WHERE id=(SELECT org_id FROM audit WHERE action='program_expired' ORDER BY seq DESC LIMIT 1)")[0].status, "declined");
+  assert.equal(sql(`SELECT slug FROM orgs WHERE id=${q1id}`)[0].slug, `x${q1id}-queue-1`, "declined address released");
+  assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "l1@q.test" }), body: joinBody({ slug: "queue-1" }) })).status, 201, "and can be used again");
+  assert.equal((await req("/api/health/ready")).j.ok, true, "maintenance still healthy");
 });
