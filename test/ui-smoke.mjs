@@ -58,15 +58,31 @@ const { META } = await import(new URL("../public/js/strings.js", import.meta.url
 const browser = await chromium.launch();
 { const nc = browser.newContext.bind(browser); browser.newContext = (o = {}) => nc({ ...o, ignoreHTTPSErrors: PROTO === "https" }); }
 const failures = [];
+// WebKit 27 (Playwright >= 1.64) reports the styling of its own <select> and <option> controls as a CSP "style-src-attr"
+// violation, attributed to the HTML or to the script that inserted the control. By message and source that is
+// indistinguishable from a real inline style attribute, so it is set aside ONLY on WebKit, ONLY for style-src-attr, and
+// ONLY because check() first proves the page's DOM holds no style attribute at all (a blocked attribute stays in the
+// DOM, so a real one is still caught). Chromium reports no such violation and stays fully strict, and every other CSP
+// directive (style-src-elem, script-src, connect-src, ...) still fails on both engines.
+const CSP_STYLE_MSG = /^Refused to apply a stylesheet because its hash, its nonce, or 'unsafe-inline' does not appear in the style-src directive/;
+function webkitSelectCsp(msg, cspv) {
+  return ENGINE === "webkit" && CSP_STYLE_MSG.test(msg) && cspv.length > 0 && cspv.every((v) => v.d === "style-src-attr" && v.blocked === "inline");
+}
 async function check(label, ctxOpts, url, assertions) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, ...ctxOpts.ctx });
   if (ctxOpts.lang) await ctx.addInitScript((x) => { try { localStorage.setItem("wwu.lang", x); } catch {} }, ctxOpts.lang);
+  // Record every Content-Security-Policy violation with its directive and source, so CSP findings are exact, not guessed.
+  await ctx.addInitScript(() => { window.__cspv = []; document.addEventListener("securitypolicyviolation",
+    (e) => window.__cspv.push({ d: e.violatedDirective, src: e.sourceFile, blocked: e.blockedURI })); });
   const pg = await ctx.newPage(); const errs = [];
   pg.on("pageerror", (e) => errs.push(e.message)); pg.on("console", (m) => m.type() === "error" && errs.push(m.text()));
   try {
     await pg.goto(url); await pg.waitForSelector(ctxOpts.ready, { timeout: 15000 });
     const text = await pg.evaluate(() => document.body.innerText);
-    assert.deepEqual(errs, [], "JS errors");
+    // Every engine: the page's own DOM never carries an inline style attribute (the CSP forbids them; CSSOM is used instead).
+    assert.equal(await pg.evaluate(() => document.querySelectorAll("[style]").length), 0, "inline style attribute in the page");
+    const cspv = await pg.evaluate(() => window.__cspv || []);
+    assert.deepEqual(errs.filter((m) => !webkitSelectCsp(m, cspv)), [], "JS errors");
     assert.ok(!/\bnull\b|\bundefined\b|\[object Object\]/.test(text), "literal null/undefined in page");
     await assertions(pg, text);
     console.log("ok  ", label);
