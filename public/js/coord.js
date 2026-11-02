@@ -19,6 +19,8 @@ function statusSection() {
   const r = D.readiness, t = D.today;
   if (!r || !t) return null;
   const items = [];
+  if (D.org.status === "pending") items.push(el("p", { class: "result err", role: "status",
+    text: "Waiting for review. Your program is saved but not public: there is no public page, volunteer form or walk form yet. Prepare corners, hours, closure days and coordinators now. An operator reviews the organization, typically within 2 business days, and then everything opens." }));
   if (D.org.demo) items.push(el("p", { class: "result ok", role: "status", text: "Demo program: the public forms work, but nothing families or volunteers submit is saved." }));
   else if (r.accepting_walks) items.push(el("p", { class: "result ok", role: "status",
     text: `Taking walk requests: ${r.coordinators} coordinator${r.coordinators === 1 ? "" : "s"}, ${r.approved_adults} approved adults.` }));
@@ -97,6 +99,51 @@ function volunteersSection() {
     el("div", { class: "scroll" }, el("table", {}, el("tbody", {}, ...rows))));
 }
 
+const REASONS = [["holiday", "School holiday"], ["recess", "School recess"], ["remote_day", "Remote school day"], ["weather", "Weather"],
+  ["not_staffed", "Not enough adults"], ["other", "Program closed (other)"]];
+const reasonText = (r) => (REASONS.find(([k]) => k === r) || [r, r])[1];
+const dayText = (d) => { const [y, m, dd] = d.split("-").map(Number); return new Date(Date.UTC(y, m - 1, dd)).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric", year: "numeric" }); };
+
+// Days the program does not run. Any coordinator can set one (a snow day is decided at 6 a.m.). Families see these on the
+// public page and cannot request a walk on them; walks already requested for that day are counted so nobody is forgotten.
+function closuresSection() {
+  const box = el("div", { "aria-live": "polite" });
+  const day = el("input", { type: "date", id: "cl-day", min: D.today_ny, value: D.today_ny });
+  const reason = el("select", { id: "cl-reason" }, ...REASONS.map(([v, t]) => el("option", { value: v, text: t })));
+  const list = D.closures.length ? el("ul", { class: "plain" }, ...D.closures.map((c) => el("li", { class: "row" },
+    el("span", { text: `${dayText(c.day)} — ${reasonText(c.reason)}` }),
+    el("button", { class: "secondary", text: "Remove", onclick: () => act(box, async () => { await api(`/api/c/${slug}/closures/${c.id}/remove`, "POST", {}); load(); }) }))))
+    : el("p", { class: "muted", text: "No closure days set. On a closure day the public page shows no times and families cannot request a walk." });
+  return el("section", { class: "card", "aria-labelledby": "clh" }, el("h2", { id: "clh", text: `Closure days (${D.closures.length})` }), list,
+    el("details", {}, el("summary", { text: "Add a closure day" }),
+      el("label", { for: "cl-day", text: "Date" }), day, el("label", { for: "cl-reason", text: "Reason (shown to families)" }), reason,
+      el("button", { text: "Save closure", onclick: () => act(box, async () => {
+        const r = await api(`/api/c/${slug}/closures`, "POST", { day: day.value, reason: reason.value });
+        note(box, r.walks_to_call ? false : true, r.walks_to_call
+          ? `Saved. ${r.walks_to_call} walk request${r.walks_to_call === 1 ? " is" : "s are"} already booked that day: call ${r.walks_to_call === 1 ? "that family" : "those families"} (Walk requests, above).`
+          : "Saved. Families now see this day as closed.");
+        setTimeout(load, 4000); }) })),
+    el("details", {}, el("summary", { text: "Add the NYC Public Schools 2026-27 days off" }),
+      el("p", { class: "muted", text: "Adds every day in the official 2026-27 calendar when no student attends in person (holidays, recesses, the Nov 3 remote day), from today on. Days you already set are kept. You can remove any of them." }),
+      el("button", { text: "Add official days off", onclick: () => act(box, async () => {
+        const r = await api(`/api/c/${slug}/closures/preset`, "POST", { preset: "nyc-public-schools-2026-27" });
+        note(box, true, el("p", { text: `Added ${r.added} day${r.added === 1 ? "" : "s"} (${r.skipped_existing} already set).` }),
+          el("p", { class: "muted", text: "Not added — decide for your schools:" }), el("ul", {}, ...r.not_included.map((t) => el("li", { text: t }))),
+          el("a", { href: r.source, target: "_blank", rel: "noopener noreferrer", text: "Official calendar (PDF)" }));
+        D = await api(`/api/c/${slug}/dashboard`); }) })),
+    box);
+}
+
+function windowsList(box) {
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], label = (id) => D.corners.find((c) => c.id === id)?.label || `#${id}`;
+  if (!D.windows.length) return el("p", { class: "muted", text: "No published hours yet." });
+  return el("div", { class: "scroll" }, el("table", {}, el("tbody", {}, ...D.windows.map((w) => el("tr", {},
+    el("td", { text: label(w.corner_id) }), el("td", { text: days[w.dow] }), el("td", { text: `${hhmm(w.start_min)}–${hhmm(w.end_min)}` }),
+    el("td", {}, el("button", { class: "secondary", text: "Remove", onclick: () => act(box, async () => {
+      if (!confirm(`Remove ${label(w.corner_id)} ${days[w.dow]} ${hhmm(w.start_min)}–${hhmm(w.end_min)} from the public schedule?`)) return;
+      await api(`/api/c/${slug}/windows/${w.id}/remove`, "POST", {}); load(); }) })))))));
+}
+
 function adminSection() {
   if (D.you.role !== "admin") return null;
   const box = el("div", { "aria-live": "polite" });
@@ -107,11 +154,12 @@ function adminSection() {
     el("details", {}, el("summary", { text: "Add a corner" }), ...f("a-label", "Label (e.g. 'Crotona Ave & E 173 St')"), ...f("a-cross", "Cross streets / landmark"),
       el("div", { class: "grid2" }, el("div", {}, ...f("a-lat", "Latitude", { inputmode: "decimal" })), el("div", {}, ...f("a-lon", "Longitude", { inputmode: "decimal" }))),
       el("button", { text: "Add corner", onclick: () => act(box, async () => { await api(`/api/c/${slug}/corners`, "POST", { label: v("a-label"), cross_streets: v("a-cross"), lat: Number(v("a-lat")), lon: Number(v("a-lon")) }); load(); }) })),
+    el("details", {}, el("summary", { text: `Published hours (${D.windows.length})` }), windowsList(box)),
     el("details", {}, el("summary", { text: "Add a coverage window" }),
       el("label", { for: "w-c", text: "Corner" }), el("select", { id: "w-c" }, ...D.corners.map((c) => el("option", { value: c.id, text: c.label }))),
       el("label", { for: "w-d", text: "Day" }), el("select", { id: "w-d" }, ...days.map((d, i) => el("option", { value: i, text: d }))),
       el("div", { class: "grid2" }, el("div", {}, ...f("w-s", "Start (HH:MM, 15-min)", { value: "07:30" })), el("div", {}, ...f("w-e", "End", { value: "08:45" }))),
-      el("button", { text: "Add window", onclick: () => act(box, async () => { await api(`/api/c/${slug}/windows`, "POST", { corner_id: Number(v("w-c")), dow: Number(v("w-d")), start: v("w-s"), end: v("w-e") }); note(box, true, "Window added."); }) })),
+      el("button", { text: "Add window", onclick: () => act(box, async () => { await api(`/api/c/${slug}/windows`, "POST", { corner_id: Number(v("w-c")), dow: Number(v("w-d")), start: v("w-s"), end: v("w-e") }); note(box, true, "Window added."); setTimeout(load, 1500); }) })),
     el("details", {}, el("summary", { text: "Add a coordinator" }), ...f("k-email", "Email (must be allowed by Cloudflare Access)", { type: "email" }),
       el("label", { class: "check" }, el("input", { type: "checkbox", id: "k-admin" }), el("span", { text: "Admin" })),
       el("button", { text: "Save", onclick: () => act(box, async () => { await api(`/api/c/${slug}/coordinators`, "POST", { email: v("k-email"), role: document.getElementById("k-admin").checked ? "admin" : "coordinator" }); note(box, true, "Saved."); }) })),
@@ -123,21 +171,90 @@ function adminSection() {
       note(box, r.ok, `Audit chain ${r.ok ? "intact" : "BROKEN — contact the maintainers"} — ${r.entries} entries for this program`); }) })), box);
 }
 
+const BOROUGHS = ["Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"];
+const ORG_TYPES = [["nonprofit", "Nonprofit (501(c)(3) or fiscally sponsored)"], ["school_parent_group", "School parent group (PTA/PA)"],
+  ["faith", "Faith community"], ["tenant_association", "Tenant or block association"], ["community_board", "Community board / civic group"], ["other", "Other community organization"]];
+const ACKS = [["ack_lead", "We have a named lead and at least one coordinator reachable during our published hours."],
+  ["ack_meet_in_person", "We meet every volunteer in person and brief them before approving them."],
+  ["ack_rule_of_two", "Walks always go to two approved adults (the software enforces this)."],
+  ["ack_not_emergency", "This is not an emergency service: danger means 911, and volunteers never act as police."],
+  ["ack_coverage", "We have, or will have before the first shift, liability coverage or a fiscal sponsor."]];
+
+function joinSection(me) {
+  const box = el("div", { "aria-live": "polite" });
+  const inp = (id, label, attrs = {}) => [el("label", { for: id, text: label }), el("input", { id, type: "text", ...attrs })];
+  const v = (id) => document.getElementById(id).value.trim();
+  const toSlug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  const name = inp("j-name", "Program name (shown to families)", { maxlength: 120, required: true });
+  const slugIn = inp("j-slug", "Web address: walk…/?o=", { maxlength: 40, pattern: "[a-z0-9-]{3,40}", required: true });
+  name[1].addEventListener("input", () => { if (!slugIn[1].dataset.edited) slugIn[1].value = toSlug(name[1].value); });
+  slugIn[1].addEventListener("input", () => { slugIn[1].dataset.edited = "1"; });
+  const acks = ACKS.map(([k, t]) => el("label", { class: "check" }, el("input", { type: "checkbox", id: k }), el("span", { text: t })));
+  return el("section", { class: "card", "aria-labelledby": "jh" }, el("h2", { id: "jh", text: "Start a Walk With Us program" }),
+    el("p", { text: `Signed in as ${me.email}. You will be the program's lead (admin). The program stays private until an operator reviews your organization, typically within 2 business days. Nothing about you or your organization is public until then.` }),
+    ...name, ...slugIn,
+    el("label", { for: "j-borough", text: "Borough" }), el("select", { id: "j-borough" }, ...BOROUGHS.map((b) => el("option", { value: b, text: b }))),
+    el("label", { for: "j-type", text: "Organization type" }), el("select", { id: "j-type" }, ...ORG_TYPES.map(([k, t]) => el("option", { value: k, text: t }))),
+    ...inp("j-phone", "Program phone shown to families (optional; never a personal cell)", { type: "tel", inputmode: "tel" }),
+    el("fieldset", { class: "card" }, el("legend", { text: "Our commitments" }), ...acks),
+    el("button", { text: "Submit for review", onclick: () => act(box, async () => {
+      const body = { name: v("j-name"), slug: v("j-slug"), borough: v("j-borough"), org_type: v("j-type"), public_phone: v("j-phone") };
+      for (const [k] of ACKS) body[k] = document.getElementById(k).checked;
+      const r = await api("/api/c/join", "POST", body);
+      note(box, true, r.next); slug = r.slug; setTimeout(() => { location.search = `?o=${encodeURIComponent(r.slug)}`; }, 2500); }) }),
+    box);
+}
+
+async function operatorSection() {
+  const box = el("div", { "aria-live": "polite" });
+  const { programs } = await api("/api/c/op/programs");
+  const when = (t) => (t ? new Date(t * 1000).toLocaleDateString() : "—");
+  const rows = programs.filter((p) => !p.demo).map((p) => el("tr", {},
+    el("td", {}, el("strong", { text: p.name }), el("div", { class: "muted", text: `${p.slug} · ${p.borough || "—"} · ${p.org_type || "—"}` }),
+      el("div", { class: "muted", text: `Lead: ${p.admins || "—"}${p.public_phone ? " · " + p.public_phone : ""}` })),
+    el("td", {}, el("span", { class: "badge " + (p.status === "live" ? "ok" : p.status === "pending" ? "warn" : ""), text: p.status }),
+      el("div", { class: "muted", text: `applied ${when(p.applied_at)} · reviewed ${when(p.reviewed_at)}` }),
+      el("div", { class: "muted", text: `${p.corners} corners · ${p.windows} hours · ${p.coordinators} coordinators` })),
+    el("td", {}, el("div", { class: "row" },
+      p.status !== "live" ? el("button", { text: "Approve (verified)", onclick: () => act(box, async () => {
+        if (!confirm(`Set ${p.name} live? Confirm you verified the organization and spoke with its lead.`)) return;
+        await api(`/api/c/op/programs/${encodeURIComponent(p.slug)}/approve`, "POST", {}); load(); }) }) : null,
+      p.status !== "declined" ? el("button", { class: "danger", text: p.status === "live" ? "Take offline" : "Decline", onclick: () => act(box, async () => {
+        if (!confirm(`${p.status === "live" ? "Take" : "Decline"} ${p.name}? Its public page and volunteer links stop immediately.`)) return;
+        await api(`/api/c/op/programs/${encodeURIComponent(p.slug)}/decline`, "POST", {}); load(); }) }) : null))));
+  const pending = programs.filter((p) => p.status === "pending").length;
+  return el("section", { class: "card", "aria-labelledby": "oph" }, el("h2", { id: "oph", text: `Operator: program review (${pending} waiting)` }),
+    el("p", { class: "muted", text: "Before approving: confirm the organization exists (website, EIN or sponsor letter), speak with the lead, and check the commitments with them. Every decision is in the audit log." }),
+    rows.length ? el("div", { class: "scroll" }, el("table", {}, el("tbody", {}, ...rows))) : el("p", { class: "muted", text: "No programs." }), box);
+}
+
 async function load() {
   try {
     if (!slug) {
       const me = await api("/api/c/me");
       document.getElementById("who").textContent = me.email;
-      if (me.orgs.length === 1 && SLUG.test(me.orgs[0].slug)) slug = me.orgs[0].slug;
-      else { content.replaceChildren(el("section", { class: "card" }, el("h2", { text: "Your programs" }),
-        el("ul", { class: "plain" }, ...me.orgs.map((o) => el("li", {}, el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: `${o.name} (${o.role})` })))))); return; }
+      if (me.orgs.length === 1 && SLUG.test(me.orgs[0].slug) && !me.operator) slug = me.orgs[0].slug;
+      else {
+        const parts = [];
+        if (me.operator) parts.push(await operatorSection());
+        if (me.orgs.length) parts.push(el("section", { class: "card" }, el("h2", { text: "Your programs" }),
+          el("ul", { class: "plain" }, ...me.orgs.map((o) => el("li", {}, el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: `${o.name} (${o.role}${o.status === "pending" ? ", waiting for review" : ""})` }))))));
+        if (!me.orgs.some((o) => o.status === "pending" && o.role === "admin")) parts.push(joinSection(me));
+        content.replaceChildren(...parts); return;
+      }
     }
     D = await api(`/api/c/${slug}/dashboard`);
     document.getElementById("who").textContent = `${D.you.email} · ${D.you.role} · ${D.org.name}`;
-    content.replaceChildren(...[statusSection(), cornersSection(), walksSection(), volunteersSection(), adminSection()].filter(Boolean));
+    content.replaceChildren(...[statusSection(), cornersSection(), walksSection(), closuresSection(), volunteersSection(), adminSection()].filter(Boolean));
   } catch (e) {
     content.replaceChildren(el("p", { class: "result err", text: e.message === "access_required" ? "Sign in through your organization's Cloudflare Access link." : e.message === "not_a_coordinator_for_org" ? "Your account is not a coordinator for this program." : "Error: " + e.message }));
   }
 }
 document.getElementById("refresh").addEventListener("click", load);
-load(); setInterval(load, 60000);
+load();
+// Auto-refresh every minute, but never while someone is filling in a form: a refresh would wipe what they typed.
+setInterval(() => {
+  const a = document.activeElement, busy = a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName);
+  if (!slug || busy || content.querySelector("details[open]")) return;
+  load();
+}, 60000);

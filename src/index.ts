@@ -26,11 +26,13 @@ export interface Env {
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
   ACCESS_JWKS_JSON?: string;   // tests only: key set used instead of fetching certs; verification still enforced
+  OPERATOR_EMAILS?: string;    // comma-separated, Access-verified emails allowed to review program sign-ups
+  JOIN_PENDING_CAP?: string;   // most programs waiting for review at once (default 25): a sign-up flood cannot bury real ones
   DEBUG?: string;              // "1" = include error message + first stack frame in logs. Local/dev only — never in production.
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)
@@ -40,7 +42,7 @@ function log(level: "info" | "warn" | "error", event: string, fields: Record<str
 }
 /** Route template for logs: ids and slugs collapsed so logs carry shape, not identifiers. */
 function routeOf(path: string): string {
-  return path.replace(/\/o\/[a-z0-9-]+/, "/o/:org").replace(/\/c\/(?!me$)[a-z0-9-]+/, "/c/:org")
+  return path.replace(/\/o\/[a-z0-9-]+/, "/o/:org").replace(/\/c\/(?!(?:me|join|op)(?:\/|$))[a-z0-9-]+/, "/c/:org")
     .replace(/\/[0-9a-z]{26}(?=\/|$)/, "/:walk").replace(/\/\d+(?=\/|$)/, "/:id");
 }
 
@@ -112,6 +114,18 @@ function nyParts(epochSec: number): { y: number; m: number; d: number; dow: numb
   const p = Object.fromEntries(f.formatToParts(new Date(epochSec * 1000)).map((x) => [x.type, x.value]));
   const dows = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   return { y: +p.year!, m: +p.month!, d: +p.day!, dow: dows.indexOf(p.weekday!), min: +p.hour! * 60 + +p.minute! };
+}
+/** New York calendar date (YYYY-MM-DD) of an instant. */
+function nyDate(epochSec: number): string {
+  const p = nyParts(epochSec);
+  return `${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
+}
+/** Calendar arithmetic on YYYY-MM-DD (no time zone involved). */
+function addDays(day: string, n: number): string {
+  const d = new Date(day + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10);
+}
+function isDate(s: unknown): s is string {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) && new Date(s + "T00:00:00Z").toISOString().slice(0, 10) === s;
 }
 /** Local NY date + HH:MM → epoch seconds (DST-correct by fixed-point iteration). */
 function nyToEpoch(date: string, time: string): number {
@@ -209,11 +223,13 @@ async function openVol(env: Env, field: string, org: number, phHmac: string, sea
 }
 
 // ------------------------------------------------------------------ lookups
-interface Org { id: number; slug: string; name: string; public_phone: string | null; borough: string | null; demo: number; }
-async function orgBySlug(env: Env, slug: string): Promise<Org> {
+interface Org { id: number; slug: string; name: string; public_phone: string | null; borough: string | null; demo: number; status: string; }
+/** Public lookup: only programs an operator has reviewed (status 'live') exist for families and volunteers. */
+async function orgBySlug(env: Env, slug: string, statuses: readonly string[] = ["live"]): Promise<Org> {
   if (!/^[a-z0-9-]{3,40}$/.test(slug)) throw new HttpError(404, "no_org");
-  const o = await retry(() => env.DB.prepare("SELECT id, slug, name, public_phone, borough, demo FROM orgs WHERE slug=? AND active=1")
-    .bind(slug).first<Org>());
+  const o = await retry(() => env.DB.prepare(
+    `SELECT id, slug, name, public_phone, borough, demo, status FROM orgs WHERE slug=? AND active=1 AND status IN (${statuses.map(() => "?").join(",")})`)
+    .bind(slug, ...statuses).first<Org>());
   if (!o) throw new HttpError(404, "no_org");
   return o;
 }
@@ -239,7 +255,7 @@ async function readiness(env: Env, org: Org): Promise<Readiness> {
             (SELECT COUNT(*) FROM volunteers WHERE org_id=?1 AND status='approved') AS v`).bind(org.id).first<{ c: number; v: number }>());
   const c = r?.c ?? 0, v = r?.v ?? 0;
   return { coordinators: c, approved_adults: v, min_approved_adults: MIN_APPROVED_ADULTS,
-    accepting_walks: org.demo === 1 || (c >= 1 && v >= MIN_APPROVED_ADULTS) };
+    accepting_walks: org.status === "live" && (org.demo === 1 || (c >= 1 && v >= MIN_APPROVED_ADULTS)) };
 }
 /** Epoch seconds of the most recent midnight in New York (DST-correct). */
 function nyMidnight(nowSec: number): number {
@@ -259,6 +275,7 @@ async function todayCounts(env: Env, orgId: number): Promise<{ walks: number; ap
 // served stale for up to 24 h (stale-if-error) so families can still see when adults are on duty.
 const cacheKey = (slug: string) => new Request(`https://cache.walkwithus.internal/org/${slug}`);
 const FRESH_S = 60, STALE_S = 86400;
+const PUBLIC_CLOSURE_DAYS = 60;   // families see closures this far ahead
 async function invalidateOrg(slug: string): Promise<void> {
   try { await caches.default.delete(cacheKey(slug)); } catch { /* cache unavailable (e.g. workers.dev): nothing to invalidate */ }
 }
@@ -275,8 +292,11 @@ async function publicOrg(env: Env, slug: string): Promise<Response> {
     const windows = (await retry(() => env.DB.prepare(
       "SELECT corner_id, dow, start_min, end_min FROM windows WHERE org_id=? ORDER BY dow, start_min").bind(o.id).all())).results;
     const ready = await readiness(env, o);
+    const today = nyDate(Math.floor(Date.now() / 1000));
+    const closures = (await retry(() => env.DB.prepare(
+      "SELECT day, reason FROM closures WHERE org_id=? AND day BETWEEN ? AND ? ORDER BY day").bind(o.id, today, addDays(today, PUBLIC_CLOSURE_DAYS)).all())).results;
     const body = { org: { slug: o.slug, name: o.name, public_phone: o.public_phone, borough: o.borough, demo: o.demo === 1 },
-      accepting_walks: ready.accepting_walks, corners, windows, turnstile_sitekey: env.TURNSTILE_SITEKEY || null, retention_hours: Number(env.RETENTION_HOURS) };
+      accepting_walks: ready.accepting_walks, corners, windows, closures, turnstile_sitekey: env.TURNSTILE_SITEKEY || null, retention_hours: Number(env.RETENTION_HOURS) };
     try {
       await caches.default.put(key, new Response(JSON.stringify(body), { headers: {
         "content-type": "application/json", "cache-control": `public, max-age=${STALE_S}`, "x-fetched-at": String(Math.floor(Date.now() / 1000)) } }));
@@ -339,6 +359,8 @@ async function walkRequest(req: Request, env: Env, slug: string): Promise<Respon
     "SELECT 1 FROM windows WHERE org_id=? AND corner_id=? AND dow=? AND start_min<=? AND end_min>?")
     .bind(o.id, c.id, p.dow, p.min, p.min).first();
   if (!w) bad("outside_published_coverage");
+  const slotDay = nyDate(slot);
+  if (await env.DB.prepare("SELECT 1 FROM closures WHERE org_id=? AND day=?").bind(o.id, slotDay).first()) throw new HttpError(409, "closed_that_day");
   const cb = phone(b.callback);
   const cbHash = await hmac(env.HMAC_KEY, "callback|" + cb);
   await limit(env, "walk-callback", cbHash, 3, 86400);
@@ -355,11 +377,15 @@ async function walkRequest(req: Request, env: Env, slug: string): Promise<Respon
      SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9
      WHERE (SELECT COUNT(*) FROM walk_requests WHERE org_id=?3 AND created_at>=?10) < ?11
        AND (SELECT COUNT(*) FROM volunteers WHERE org_id=?3 AND status='approved') >= ?12
-       AND EXISTS (SELECT 1 FROM coordinators WHERE org_id=?3)`)
+       AND EXISTS (SELECT 1 FROM coordinators WHERE org_id=?3)
+       AND NOT EXISTS (SELECT 1 FROM closures WHERE org_id=?3 AND day=?13)
+       AND EXISTS (SELECT 1 FROM orgs WHERE id=?3 AND status='live' AND active=1)`)
     .bind(id, ref, o.id, c.id, slot, await seal(env.DATA_KEY, `walk|callback|${o.id}|${id}`, cb), cbHash, lang, expires,
-      since, cap, MIN_APPROVED_ADULTS).run();
+      since, cap, MIN_APPROVED_ADULTS, slotDay).run();
   if (!ins.meta.changes) {
-    const now2 = await readiness(env, o);
+    // A closure added, or the program taken off line, while this request was in flight.
+    if (await env.DB.prepare("SELECT 1 FROM closures WHERE org_id=? AND day=?").bind(o.id, slotDay).first()) throw new HttpError(409, "closed_that_day");
+    const now2 = await readiness(env, { ...o, status: (await env.DB.prepare("SELECT status FROM orgs WHERE id=?").bind(o.id).first<{ status: string }>())?.status ?? "declined" });
     throw now2.accepting_walks ? new HttpError(429, "program_daily_limit") : new HttpError(409, "program_not_ready");
   }
   await audit(env, o.id, "public", "walk_requested", id);
@@ -370,7 +396,10 @@ async function walkRequest(req: Request, env: Env, slug: string): Promise<Respon
 async function volunteerByToken(env: Env, token: unknown) {
   if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new HttpError(401, "bad_token");
   const h = await sha256("cap|" + token);
-  const v = await env.DB.prepare("SELECT id, org_id, name_enc, phone_hmac FROM volunteers WHERE token_hash=? AND status='approved'")
+  // A link works only while the volunteer is approved AND the program is live (a declined program's links stop at once).
+  const v = await env.DB.prepare(
+    `SELECT v.id, v.org_id, v.name_enc, v.phone_hmac FROM volunteers v JOIN orgs o ON o.id=v.org_id
+     WHERE v.token_hash=? AND v.status='approved' AND o.status='live' AND o.active=1`)
     .bind(h).first<{ id: number; org_id: number; name_enc: string; phone_hmac: string }>();
   if (!v) throw new HttpError(401, "bad_token");
   await limit(env, "vol-token", h, 60, 3600);
@@ -416,6 +445,36 @@ async function volunteerApi(req: Request, env: Env, action: string): Promise<Res
 // ------------------------------------------------------------------ coordinator handlers (Access + coordinators)
 /** A coordinator can decrypt at most 30 contact numbers per hour. Normal work needs a handful; a bulk export cannot hide. */
 const REVEALS_PER_HOUR = 30;
+const CLOSURE_REASONS: readonly string[] = ["holiday", "recess", "remote_day", "weather", "not_staffed", "other"];
+const CLOSURE_HORIZON_DAYS = 400, MAX_FUTURE_CLOSURES = 120;
+/** Weekday expansion of an inclusive date range (school recesses list calendar ranges; weekends never had school). */
+function weekdays(from: string, to: string, reason: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) { const w = new Date(d + "T00:00:00Z").getUTCDay(); if (w > 0 && w < 6) out.push([d, reason]); }
+  return out;
+}
+/**
+ * Closure presets from official calendars. Only days when NO student attends in person are included; partial days are
+ * listed in `not_included` for the program to decide. Source checked 2026-11-02 (every weekday re-verified).
+ */
+const CLOSURE_PRESETS: Record<string, { source: string; days: Array<[string, string]>; not_included: string[] }> = {
+  "nyc-public-schools-2026-27": {
+    source: "https://www.schools.nyc.gov/docs/default-source/sections/calendar/2026-27-school-year-calendar.pdf",
+    days: [
+      ["2026-09-21", "holiday"], ["2026-10-12", "holiday"], ["2026-11-03", "remote_day"], ["2026-11-11", "holiday"],
+      ...weekdays("2026-11-26", "2026-11-27", "recess"), ...weekdays("2026-12-24", "2027-01-01", "recess"),
+      ["2027-01-18", "holiday"], ...weekdays("2027-02-15", "2027-02-19", "recess"), ["2027-03-09", "holiday"],
+      ["2027-03-26", "holiday"], ...weekdays("2027-04-22", "2027-04-30", "recess"), ["2027-05-17", "holiday"],
+      ["2027-05-31", "holiday"], ["2027-06-10", "holiday"],
+    ],
+    not_included: [
+      "2027-02-01: high schools and 6-12 schools only (professional development day)",
+      "2027-06-08: no classes for 3-K, Pre-K, elementary, middle, K-12 and D75 (clerical day); high schools attend",
+      "Early dismissal, 3 hours early: 2026-11-05 and 2027-03-03 elementary/Pre-K; 2026-11-12 and 2027-03-04 middle/D75; 2026-11-20 and 2027-03-19 high schools, K-12, 6-12",
+      "Summer: last day for students 2027-06-28; first day 2026-09-10",
+    ],
+  },
+};
 const COVERAGE_MIN_CELL = 3;      // walks_done of 1..COVERAGE_MIN_CELL-1 is reported as null (small-cell suppression)
 const COVERAGE_MAX_DAYS = 731;    // one export covers at most two years
 async function revealGuard(env: Env, orgId: number, actor: string): Promise<void> {
@@ -428,7 +487,7 @@ async function revealGuard(env: Env, orgId: number, actor: string): Promise<void
 async function coordinator(req: Request, env: Env, slug: string): Promise<{ id: Identity; org: Org; role: string }> {
   const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
   if (!id) throw new HttpError(401, "access_required");
-  const org = await orgBySlug(env, slug);
+  const org = await orgBySlug(env, slug, ["pending", "live"]);   // a pending program's lead prepares it before review
   const row = await env.DB.prepare("SELECT role FROM coordinators WHERE email=? AND org_id=?").bind(id.email, org.id)
     .first<{ role: string }>();
   if (!row) throw new HttpError(403, "not_a_coordinator_for_org");
@@ -477,7 +536,13 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     const onShift = (await env.DB.prepare(
       "SELECT volunteer_id, corner_id, checkin_at FROM shifts WHERE org_id=? AND checkout_at IS NULL").bind(org.id).all()).results;
     const ready = await readiness(env, org), today = await todayCounts(env, org.id), cap = caps(env);
-    return json({ org: { slug: org.slug, name: org.name, demo: org.demo === 1 }, you: { email: actor, role }, corners, walks, volunteers, on_shift: onShift,
+    const windows = (await env.DB.prepare("SELECT id, corner_id, dow, start_min, end_min FROM windows WHERE org_id=? ORDER BY dow, start_min")
+      .bind(org.id).all()).results;
+    const todayNY = nyDate(now);
+    const closures = (await env.DB.prepare("SELECT id, day, reason FROM closures WHERE org_id=? AND day >= ? ORDER BY day")
+      .bind(org.id, todayNY).all()).results;
+    return json({ org: { slug: org.slug, name: org.name, demo: org.demo === 1, status: org.status }, you: { email: actor, role }, corners, walks, volunteers, on_shift: onShift,
+      windows, closures, today_ny: todayNY,
       readiness: ready, unreadable_records: unreadable, today: { ...today, walk_cap: cap.walk, apply_cap: cap.apply,
         walks_near_cap: today.walks >= Math.ceil(cap.walk * 0.8), applications_near_cap: today.applications >= Math.ceil(cap.apply * 0.8) },
       rule_of_two: "a corner counts as covered only with >= 2 adults; a walk is assigned only to 2 distinct approved adults" });
@@ -511,6 +576,52 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
   }
 
   if (req.method !== "POST") throw new HttpError(405, "method");
+
+  // Closure days. Any coordinator may add or remove one: a snow day or a staffing gap is decided early in the morning.
+  if (res === "closures") {
+    const todayNY = nyDate(now), last = addDays(todayNY, CLOSURE_HORIZON_DAYS);
+    const future = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM closures WHERE org_id=? AND day>=?").bind(org.id, todayNY).first<{ n: number }>())?.n ?? 0;
+    if (!rid) {
+      const b = await body<Record<string, unknown>>(req, ["day", "reason"]);
+      if (!isDate(b.day)) bad("bad_day");
+      if (b.day < todayNY || b.day > last) bad("day_out_of_range");
+      if (typeof b.reason !== "string" || !CLOSURE_REASONS.includes(b.reason)) bad("bad_reason");
+      if (await future() >= MAX_FUTURE_CLOSURES) bad("too_many_closures");
+      const r = await env.DB.prepare("INSERT INTO closures (org_id, day, reason) VALUES (?,?,?) ON CONFLICT(org_id, day) DO UPDATE SET reason=excluded.reason")
+        .bind(org.id, b.day, b.reason).run();
+      await audit(env, org.id, actor, "closure_set", `${b.day}|${b.reason}`);
+      await invalidateOrg(org.slug);
+      const open = (await env.DB.prepare("SELECT COUNT(*) AS n FROM walk_requests WHERE org_id=? AND status IN ('open','assigned') AND slot_start>=? AND slot_start<?")
+        .bind(org.id, nyToEpoch(b.day, "00:00"), nyToEpoch(addDays(b.day, 1), "00:00")).first<{ n: number }>())?.n ?? 0;
+      // Walks already requested for that day are not cancelled silently: the coordinator is told to call those families.
+      return json({ ok: true, changed: r.meta.changes, walks_to_call: open }, 201);
+    }
+    if (rid === "preset") {
+      const b = await body<Record<string, unknown>>(req, ["preset"]);
+      const ps = typeof b.preset === "string" ? CLOSURE_PRESETS[b.preset] : undefined;
+      if (!ps) bad("bad_preset");
+      const days = ps.days.filter(([d]) => d >= todayNY && d <= last);
+      if (await future() + days.length > MAX_FUTURE_CLOSURES) bad("too_many_closures");
+      let added = 0;
+      for (const [d, reason] of days) {
+        const r = await env.DB.prepare("INSERT INTO closures (org_id, day, reason) VALUES (?,?,?) ON CONFLICT(org_id, day) DO NOTHING").bind(org.id, d, reason).run();
+        added += r.meta.changes;
+      }
+      await audit(env, org.id, actor, "closures_preset", `${b.preset}|added:${added}`);
+      await invalidateOrg(org.slug);
+      return json({ ok: true, added, skipped_existing: days.length - added, source: ps.source, not_included: ps.not_included }, 201);
+    }
+    if (verb === "remove") {
+      await body(req, []);
+      const cid = int(Number(rid), "bad_id");
+      const r = await env.DB.prepare("DELETE FROM closures WHERE id=? AND org_id=?").bind(cid, org.id).run();
+      if (!r.meta.changes) throw new HttpError(404, "no_closure");
+      await audit(env, org.id, actor, "closure_removed", `closure:${cid}`);
+      await invalidateOrg(org.slug);
+      return json({ ok: true });
+    }
+    throw new HttpError(404, "not_found");
+  }
 
   if (res === "volunteers" && rid && (verb === "approve" || verb === "suspend" || verb === "reveal")) {
     await body(req, []);
@@ -616,6 +727,15 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     await invalidateOrg(org.slug);
     return json({ ok: true }, 201);
   }
+  if (res === "windows" && rid && verb === "remove") {
+    await body(req, []);
+    const wid = int(Number(rid), "bad_id");
+    const r = await env.DB.prepare("DELETE FROM windows WHERE id=? AND org_id=?").bind(wid, org.id).run();
+    if (!r.meta.changes) throw new HttpError(404, "no_window");
+    await audit(env, org.id, actor, "window_removed", `window:${wid}`);
+    await invalidateOrg(org.slug);
+    return json({ ok: true });
+  }
   if (res === "coordinators" && (!rid || rid === "remove")) {
     const b = await body<Record<string, unknown>>(req, rid === "remove" ? ["email"] : ["email", "role"]);
     const email = str(b.email, 6, 254, "bad_email").toLowerCase();
@@ -669,9 +789,10 @@ export async function purge(env: Env, nowSec = Math.floor(Date.now() / 1000)): P
     env.DB.prepare("DELETE FROM walk_requests WHERE expires_at < ?").bind(nowSec),
     env.DB.prepare("DELETE FROM rate WHERE window_start < ?").bind(nowSec - 2 * 86400),
     env.DB.prepare("DELETE FROM volunteers WHERE status='pending' AND created_at < ?").bind(nowSec - 30 * 86400),
+    env.DB.prepare("DELETE FROM closures WHERE day < ?").bind(addDays(nyDate(nowSec), -7)),
   ]);
   return { shifts_closed: r[0]!.meta.changes, shifts_purged: r[2]!.meta.changes, walks_purged: r[4]!.meta.changes,
-    rate_purged: r[5]!.meta.changes, stale_applications_purged: r[6]!.meta.changes };
+    rate_purged: r[5]!.meta.changes, stale_applications_purged: r[6]!.meta.changes, closures_purged: r[7]!.meta.changes };
 }
 
 // ------------------------------------------------------------------ self-healing maintenance (cron)
@@ -795,7 +916,7 @@ async function health(env: Env): Promise<Response> {
         `SELECT COUNT(*) AS total, SUM(demo) AS demo,
                 SUM(CASE WHEN demo=0 AND EXISTS (SELECT 1 FROM coordinators c WHERE c.org_id=o.id)
                           AND (SELECT COUNT(*) FROM volunteers v WHERE v.org_id=o.id AND v.status='approved') >= ?1 THEN 1 ELSE 0 END) AS accepting
-         FROM orgs o WHERE active=1`).bind(MIN_APPROVED_ADULTS).first<{ total: number; demo: number; accepting: number }>();
+         FROM orgs o WHERE active=1 AND status='live'`).bind(MIN_APPROVED_ADULTS).first<{ total: number; demo: number; accepting: number }>();
       checks.programs = { total: p?.total ?? 0, demo: p?.demo ?? 0, accepting_walks: p?.accepting ?? 0 };
     } catch { /* informational only */ }
   }
@@ -813,6 +934,90 @@ async function health(env: Env): Promise<Response> {
   return json({ ok: problems.length === 0, version: VERSION, problems, checks }, problems.length ? 503 : 200);
 }
 
+// ------------------------------------------------------------------ program sign-up (Access-verified lead) and operator review
+// A lead signs in through Cloudflare Access (their email is verified there), describes the organization and accepts the
+// program's commitments. The program starts 'pending': its lead can prepare corners, hours and coordinators, but no
+// family, volunteer or walk form exists until an operator has reviewed the organization and set it live.
+const BOROUGHS: readonly string[] = ["Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"];
+const ORG_TYPES: readonly string[] = ["nonprofit", "school_parent_group", "faith", "tenant_association", "community_board", "other"];
+const RESERVED_SLUGS: readonly string[] = ["me", "join", "op", "api", "admin", "demo", "www", "help", "new", "test"];
+const JOIN_ACKS = ["ack_lead", "ack_meet_in_person", "ack_rule_of_two", "ack_not_emergency", "ack_coverage"] as const;
+function isOperator(env: Env, email: string): boolean {
+  return (env.OPERATOR_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean).includes(email.toLowerCase());
+}
+const formatPhone = (e164: string) => `(${e164.slice(2, 5)}) ${e164.slice(5, 8)}-${e164.slice(8)}`;
+
+async function programJoin(req: Request, env: Env): Promise<Response> {
+  const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
+  if (!id) throw new HttpError(401, "access_required");
+  const email = id.email.toLowerCase();
+  await limit(env, "join-email", email, 20, 86400);
+  const b = await body<Record<string, unknown>>(req, ["name", "slug", "borough", "org_type", "public_phone", ...JOIN_ACKS]);
+  const name = str(b.name, 3, 120, "bad_name");
+  const slug = str(b.slug, 3, 40, "bad_slug").toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{1,38})[a-z0-9]$/.test(slug) || slug.includes("--")) bad("bad_slug");
+  if (RESERVED_SLUGS.includes(slug)) bad("slug_reserved");
+  if (typeof b.borough !== "string" || !BOROUGHS.includes(b.borough)) bad("bad_borough");
+  if (typeof b.org_type !== "string" || !ORG_TYPES.includes(b.org_type)) bad("bad_org_type");
+  const pub = b.public_phone === undefined || b.public_phone === "" ? null : formatPhone(phone(b.public_phone));
+  for (const k of JOIN_ACKS) if (b[k] !== true) bad("commitments_required");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) bad("bad_email");
+  const mine = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=? AND c.role='admin' AND o.status='pending'").bind(email).first<{ n: number }>();
+  if ((mine?.n ?? 0) > 0) throw new HttpError(409, "application_pending");
+  const cap = Math.max(1, Number(env.JOIN_PENDING_CAP) || 25);
+  const now = Math.floor(Date.now() / 1000);
+  let orgId: number;
+  try {
+    // The pending ceiling is re-checked inside the INSERT, so a burst of sign-ups cannot overshoot it.
+    const r = await env.DB.prepare(
+      `INSERT INTO orgs (slug, name, borough, public_phone, demo, status, org_type, applied_at)
+       SELECT ?1,?2,?3,?4,0,'pending',?5,?6 WHERE (SELECT COUNT(*) FROM orgs WHERE status='pending') < ?7`)
+      .bind(slug, name, b.borough, pub, b.org_type, now, cap).run();
+    if (!r.meta.changes) throw new HttpError(429, "review_queue_full");
+    orgId = Number(r.meta.last_row_id);
+  } catch (e) {
+    if (e instanceof HttpError) throw e;
+    if (String(e).includes("UNIQUE")) throw new HttpError(409, "slug_taken");
+    throw e;
+  }
+  await env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,'admin')").bind(email, orgId).run();
+  await audit(env, orgId, email, "program_applied", `type:${b.org_type}|borough:${b.borough}`);
+  return json({ ok: true, slug, status: "pending",
+    next: "Your program is saved but not public. Add corners, hours and coordinators now; an operator reviews the organization (typically within 2 business days) and then your public page, volunteer form and walk form open." }, 201);
+}
+
+async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Response> {
+  const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
+  if (!id) throw new HttpError(401, "access_required");
+  if (!isOperator(env, id.email)) throw new HttpError(403, "operator_only");
+  const [res, slug, verb] = rest;
+  if (req.method === "GET" && res === "programs" && !slug) {
+    const { results } = await env.DB.prepare(
+      `SELECT o.slug, o.name, o.borough, o.org_type, o.status, o.public_phone, o.applied_at, o.reviewed_at, o.demo,
+              (SELECT group_concat(email, ', ') FROM coordinators c WHERE c.org_id=o.id AND c.role='admin') AS admins,
+              (SELECT COUNT(*) FROM corners c WHERE c.org_id=o.id AND c.active=1) AS corners,
+              (SELECT COUNT(*) FROM windows w WHERE w.org_id=o.id) AS windows,
+              (SELECT COUNT(*) FROM coordinators c WHERE c.org_id=o.id) AS coordinators
+       FROM orgs o WHERE o.active=1 ORDER BY CASE o.status WHEN 'pending' THEN 0 WHEN 'live' THEN 1 ELSE 2 END, o.applied_at`).all();
+    return json({ programs: results });
+  }
+  if (req.method === "POST" && res === "programs" && slug && (verb === "approve" || verb === "decline")) {
+    await body(req, []);
+    if (!/^[a-z0-9-]{3,40}$/.test(slug)) throw new HttpError(404, "no_org");
+    const o = await env.DB.prepare("SELECT id, slug, status, demo FROM orgs WHERE slug=? AND active=1").bind(slug).first<{ id: number; slug: string; status: string; demo: number }>();
+    if (!o) throw new HttpError(404, "no_org");
+    if (o.demo === 1) bad("demo_program");
+    const to = verb === "approve" ? "live" : "declined";
+    if (o.status === to) return json({ ok: true, status: to, changed: false });
+    await env.DB.prepare("UPDATE orgs SET status=?, reviewed_at=? WHERE id=?").bind(to, Math.floor(Date.now() / 1000), o.id).run();
+    await audit(env, o.id, id.email, verb === "approve" ? "program_approved" : "program_declined", `${o.status}->${to}`);
+    await invalidateOrg(o.slug);
+    return json({ ok: true, status: to, changed: true });
+  }
+  throw new HttpError(404, "not_found");
+}
+
 // ------------------------------------------------------------------ router
 async function route(req: Request, env: Env, p: string[]): Promise<Response> {
   if (!env.DATA_KEY || !env.HMAC_KEY) throw new HttpError(503, "not_configured");
@@ -822,7 +1027,7 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
     return await health(env);
   }
   if (req.method === "GET" && p[1] === "orgs" && p.length === 2) {
-    const { results } = await retry(() => env.DB.prepare("SELECT slug, name, borough, demo = 1 AS demo FROM orgs WHERE active=1 ORDER BY name").all());
+    const { results } = await retry(() => env.DB.prepare("SELECT slug, name, borough, demo = 1 AS demo FROM orgs WHERE active=1 AND status='live' ORDER BY name").all());
     return json({ orgs: results });
   }
   if (p[1] === "o" && p[2]) {
@@ -835,9 +1040,11 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
     const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
     if (!id) throw new HttpError(401, "access_required");
     const { results } = await env.DB.prepare(
-      "SELECT o.slug, o.name, c.role FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=?").bind(id.email).all();
-    return json({ email: id.email, orgs: results });
+      "SELECT o.slug, o.name, o.status, c.role FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=? AND o.active=1 AND o.status<>'declined'").bind(id.email).all();
+    return json({ email: id.email, orgs: results, operator: isOperator(env, id.email) });
   }
+  if (p[1] === "c" && p[2] === "join" && p.length === 3 && req.method === "POST") return await programJoin(req, env);
+  if (p[1] === "c" && p[2] === "op") return await operatorApi(req, env, p.slice(3));
   if (p[1] === "c" && p[2]) return await coordApi(req, env, p[2], p.slice(3));
   throw new HttpError(404, "not_found");
 }
