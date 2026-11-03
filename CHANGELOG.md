@@ -17,12 +17,28 @@
   - The operator's staff page links to the console and no longer shows the self-serve sign-up form.
 - **Lead recovery:** the operator can assign or replace a program's lead (`POST /api/op/programs/:slug/lead`), for example when its only admin has left. Other admins step down; nobody is removed silently.
 - **Lead handover in one step:** a live program's admin hands the lead role to someone else (`POST /api/c/:slug/coordinators/handover`). The program always keeps an admin.
-- Migration `0006_google_sessions.sql` (new `sessions` table; hourly maintenance purges expired rows).
+- **Hardening from the independent security review** (no critical or high findings):
+  - **Invite-only by default (`JOIN_MODE=invite`):** any Google account can sign in, so self-serve sign-up is off unless `JOIN_MODE=open`. Programs are set up by the operator from an intake.
+  - **Account binding:** each address is bound to the first Google account (`sub`) that uses it. A different account with the same address is refused; only the operator's lead assignment releases it.
+  - **Cross-site requests refused on every route:** session requests from another site are refused for reads too (`Sec-Fetch-Site`), not only writes.
+  - **Access tokens off on public staff pages:** staff routes accept Access tokens only during a migration (`ACCESS_FOR_STAFF=1`). Paths with `//` are refused.
+  - **Sign-in limits raised** for shared school and carrier networks.
+  - **Replaced pending applicants lose access:** replacing the applicant of a pending program removes them.
+  - **Last admin guaranteed:** the last-admin rule is enforced inside the database write, so concurrent removals cannot leave a program without an admin.
+  - **Health check flags test settings:** readiness reports `test_overrides_set` when a test-only key or URL is configured outside the test suites.
+- Migration `0006_google_sessions.sql` (new `sessions` and `google_identities` tables; hourly maintenance purges expired sessions).
 - `/api/c/me` answers `200 { signed_in: false }` when signed out (a normal state for the staff page, not an error). Privacy page updated. Service-worker cache `wwu-v14`.
 - Tests:
-  - e2e 47 (10 new), with a fake Google token endpoint that enforces single-use codes, PKCE and `redirect_uri`.
+  - e2e 51 (14 new), with a fake Google token endpoint that enforces single-use codes, PKCE and `redirect_uri`. The last test restarts the Worker with production defaults.
   - Refused: forged, unknown-key, `alg: none`, wrong-audience, wrong-issuer, expired, future-dated, unverified-email, wrong-nonce and replayed tokens, as well as state mismatch, a missing or tampered flow cookie, and cross-site writes.
-  - Mutation-checked: removing the signature, nonce, `email_verified` or same-site check, or granting operator rights via Google, each makes a test fail.
+  - Mutation-checked: removing any of these makes a test fail:
+    - the signature, nonce or `email_verified` check;
+    - the same-site write or read check;
+    - the account binding;
+    - the `ACCESS_FOR_STAFF` gate;
+    - invite-only sign-up;
+    - the `//` refusal;
+    - and granting operator rights via Google.
   - Migrations 4 and UI smoke (Chromium and WebKit) also pass.
 
 ## 1.4.1 — 2026-11-02

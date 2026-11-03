@@ -205,7 +205,8 @@ function joinSection(me) {
 // Program staff sign in with their own Google account; the program's lead adds that address to the staff list.
 function signinSection(googleReady) {
   const h = new URLSearchParams(location.hash.slice(1)).get("signin");
-  const msg = h === "failed" ? "Sign-in did not complete. Please try again." : h === "unavailable" || googleReady === false ? "Google sign-in is not available yet. Please contact the Walk With Us operator." : null;
+  const msg = h === "failed" ? "Sign-in did not complete. Please try again."
+    : h === "account" ? "This email address is already linked to a different Google account. Ask the Walk With Us operator to reset it after confirming who you are." : h === "unavailable" || googleReady === false ? "Google sign-in is not available yet. Please contact the Walk With Us operator." : null;
   return el("section", { class: "card", "aria-labelledby": "sh" }, el("h2", { id: "sh", text: "Program staff sign-in" }),
     el("p", { text: "Coordinators and leads of a Walk With Us program sign in with the Google account (Gmail or Google Workspace) their program lead added. We receive only your email address from Google." }),
     msg ? el("p", { class: "result err", role: "alert", text: msg }) : null,
@@ -232,7 +233,11 @@ async function load() {
         if (me.orgs.length) parts.push(el("section", { class: "card" }, el("h2", { text: "Your programs" }),
           el("ul", { class: "plain" }, ...me.orgs.map((o) => el("li", {}, el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: `${o.name} (${o.role}${o.status === "pending" ? ", waiting for review" : ""})` }))))));
         // The operator sets programs up from an intake in the console; the self-serve form is for organizations.
-        if (!me.operator && !me.orgs.some((o) => o.status === "pending" && o.applied)) parts.push(joinSection(me));
+        if (!me.operator && me.join_open && !me.orgs.some((o) => o.status === "pending" && o.applied)) parts.push(joinSection(me));
+        else if (!me.operator && !me.orgs.length) parts.push(el("section", { class: "card", "aria-labelledby": "nh" }, el("h2", { id: "nh", text: "No program yet" }),
+          el("p", { text: `You are signed in as ${me.email}, but this address is not on any program's staff list.` }),
+          el("ul", {}, el("li", { text: "Coordinators: ask your program's lead to add this exact Google address." }),
+            el("li", { text: "Organizations that want to run a program: the Walk With Us team sets it up with you after an intake conversation (see the home page)." }))));
         content.replaceChildren(...parts); return;
       }
     }

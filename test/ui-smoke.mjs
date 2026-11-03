@@ -28,7 +28,7 @@ const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 20
 const jwk = publicKey.export({ format: "jwk" });
 rmSync(P, { recursive: true, force: true }); mkdirSync(".wrangler", { recursive: true });
 writeFileSync(".dev.vars", [`DATA_KEY=${randomBytes(32).toString("base64")}`, `HMAC_KEY=${randomBytes(32).toString("base64")}`,
-  "ACCESS_TEAM_DOMAIN=t.cloudflareaccess.com", "ACCESS_AUD=a", "OPERATOR_EMAILS=ops@demo.test", "GOOGLE_CLIENT_ID=ui-test.apps.googleusercontent.com", "GOOGLE_CLIENT_SECRET=ui-test-secret", `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: "k", alg: "RS256" }] })}`].join("\n") + "\n");
+  "ACCESS_TEAM_DOMAIN=t.cloudflareaccess.com", "ACCESS_AUD=a", "OPERATOR_EMAILS=ops@demo.test", "GOOGLE_CLIENT_ID=ui-test.apps.googleusercontent.com", "GOOGLE_CLIENT_SECRET=ui-test-secret", "JOIN_MODE=open", "ACCESS_FOR_STAFF=1", "WWU_TEST=1", `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: "k", alg: "RS256" }] })}`].join("\n") + "\n");
 execFileSync("npx", ["wrangler", "d1", "migrations", "apply", "walkwithus", "--local", "--persist-to", P], { stdio: "ignore" });
 // A closure two days out: every family-page language must render the closure list, and that day must offer no times.
 const CLOSED_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(Date.now() + 2 * 86400000));

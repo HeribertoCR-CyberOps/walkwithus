@@ -13,3 +13,11 @@ CREATE TABLE sessions (
 );
 CREATE INDEX idx_sessions_email ON sessions(email);
 CREATE INDEX idx_sessions_expires ON sessions(expires_at);
+-- Each email is bound to the first Google account (its permanent "sub" id) that signs in with it. A different Google
+-- account presenting the same address later (a former owner of the address, or someone who re-registered a lapsed
+-- domain) is refused. Only the operator's lead assignment releases a binding (account recovery, done in person).
+CREATE TABLE google_identities (
+  email     TEXT PRIMARY KEY CHECK (email = lower(email) AND length(email) <= 254),
+  sub       TEXT NOT NULL CHECK (length(sub) BETWEEN 1 AND 255),
+  bound_at  INTEGER NOT NULL
+);

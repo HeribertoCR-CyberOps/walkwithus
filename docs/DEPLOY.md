@@ -37,8 +37,15 @@ Built in, nothing to configure: per-network rate limits (IPv4 address or IPv6 /6
 - Policy: Allow → the operator's email(s) only. Login method One-time PIN or a verified identity provider; MFA if you can.
 - Copy the **AUD tag**. Set `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) in `wrangler.jsonc` vars, and `OPERATOR_EMAILS` (comma-separated).
 - Operator rights are granted **only** through a verified Access token. A Google session for the same address is treated as program staff.
+- Narrow the policy to the operator email(s) only. An "Everyone" policy would keep issuing valid tokens and using seats for no reason.
+- Set `workers_dev: false` (and keep `preview_urls: false`). On a `*.workers.dev` address nothing sits in front of `/api/op/*`. The Worker still verifies every Access token there, but there is no reason to expose a second address.
 - Only use identity providers that verify the email they assert. Never one where users choose their own email claim.
-- Upgrading from 1.4: **first** add the three destinations above to your existing Access application, **then** deploy 1.5, **then** remove the old `/c.html`, `/c` and `/api/c/*` destinations. Every step keeps working in between: staff pages accept an Access token as well as Google.
+- **Upgrading from 1.4**, in this order:
+  1. Add the three destinations above to your existing Access application.
+  2. Deploy 1.5 with the Google settings below. If staff currently sign in through Access, also set `ACCESS_FOR_STAFF=1`, so they keep working until they have used Google once.
+  3. Remove the old `/c.html`, `/c` and `/api/c/*` destinations, and narrow the policy to the operator.
+  4. Remove `ACCESS_FOR_STAFF` and redeploy.
+- Without `ACCESS_FOR_STAFF=1`, the public staff pages ignore Access tokens entirely. Once Access no longer stands in front of them, it cannot revoke or re-check those tokens there.
 
 **3b. Google sign-in for program staff.** Google Cloud console:
 1. Create a project, for example "Walk With Us".
@@ -51,7 +58,11 @@ Built in, nothing to configure: per-network rate limits (IPv4 address or IPv6 /6
 
 Without the two Google settings, the staff page says sign-in is not available yet. Nothing else breaks.
 
-`JOIN_PENDING_CAP` (default 25) limits how many self-serve sign-ups can wait for review at once.
+**3c. How programs are created: `JOIN_MODE`.**
+- **`invite`** (default): you set each program up from an intake in the operator console, naming its lead's Google address. Signing in with Google gives a stranger nothing: no program, and no sign-up form.
+- **`open`**: anyone signed in with Google may submit a program for review. It stays private until you approve it, with 10 sign-ups per network per day and `JOIN_PENDING_CAP` (default 25) waiting at once. Use this only if you are ready to clear fake sign-ups.
+
+**Account binding:** each email address is bound to the first Google account that signs in with it. A different Google account presenting the same address is refused. This covers a former owner of a work address, or someone who re-registered a lapsed domain. The person sees "linked to a different Google account". After you have confirmed who they are, **Assign or replace the lead** in the console releases the binding for that address.
 
 The Worker verifies every Access JWT (RS256, issuer, audience, expiry, key id) and every Google ID token (signature, issuer, audience, expiry, nonce, verified email) itself.
 

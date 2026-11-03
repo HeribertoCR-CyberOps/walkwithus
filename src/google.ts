@@ -55,8 +55,8 @@ export async function exchangeCode(code: string, clientId: string, clientSecret:
   return typeof d.id_token === "string" && d.id_token.length < 8192 ? d.id_token : null;
 }
 
-/** Verify a Google ID token. Returns the verified, lower-cased email, or null. */
-export async function verifyIdToken(tok: string, clientId: string, nonce: string, override?: string): Promise<string | null> {
+/** Verify a Google ID token. Returns the verified, lower-cased email and Google's permanent account id (sub), or null. */
+export async function verifyIdToken(tok: string, clientId: string, nonce: string, override?: string): Promise<{ email: string; sub: string } | null> {
   const parts = tok.split(".");
   if (parts.length !== 3) return null;
   const [h, p, s] = parts as [string, string, string];
@@ -81,5 +81,7 @@ export async function verifyIdToken(tok: string, clientId: string, nonce: string
   if (payload.email_verified !== true) return null;                        // Google must have verified the address
   const email = typeof payload.email === "string" ? payload.email.trim().toLowerCase() : "";
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || email.length > 254) return null;
-  return email;
+  const sub = typeof payload.sub === "string" ? payload.sub : "";
+  if (!/^[\w-]{1,255}$/.test(sub)) return null;                          // Google's stable account id: the address is bound to it
+  return { email, sub };
 }

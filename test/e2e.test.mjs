@@ -105,14 +105,18 @@ async function openNode(keyB64, aad, sealed) {
 const nyDate = (plusDays) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(Date.now() + plusDays * 86400000));
 
 const KEY1 = randomBytes(32).toString("base64"), KEY2 = randomBytes(32).toString("base64"), HKEY = randomBytes(32).toString("base64");
-function writeVars(extra) {
+function writeVars(extra, over = {}) {
   const jwk = publicKey.export({ format: "jwk" });
-  writeFileSync(".dev.vars", [
+  const base = [
     `HMAC_KEY=${HKEY}`, `ACCESS_TEAM_DOMAIN=${TEAM}`, `ACCESS_AUD=${AUD}`,
     `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] })}`, "OPERATOR_EMAILS=ops@maintainer.test", "JOIN_PENDING_CAP=3",
     `GOOGLE_CLIENT_ID=${GCLIENT}`, `GOOGLE_CLIENT_SECRET=${GSECRET}`, `GOOGLE_TOKEN_URL=http://127.0.0.1:${IDP_PORT}/token`,
-    `GOOGLE_JWKS_JSON=${JSON.stringify({ keys: [{ ...gPub.export({ format: "jwk" }), kid: GKID, alg: "RS256" }] })}`, ...extra,
-  ].join("\n") + "\n");
+    `GOOGLE_JWKS_JSON=${JSON.stringify({ keys: [{ ...gPub.export({ format: "jwk" }), kid: GKID, alg: "RS256" }] })}`,
+    // Most tests use self-serve sign-up and Access tokens for staff; the last test runs the production defaults.
+    "JOIN_MODE=open", "ACCESS_FOR_STAFF=1", "WWU_TEST=1", ...extra,
+  ];
+  const lines = base.filter((l) => !(l.split("=")[0] in over)).concat(Object.entries(over).filter(([, v]) => v !== "").map(([k, v]) => `${k}=${v}`));
+  writeFileSync(".dev.vars", lines.join("\n") + "\n");
 }
 async function startServer() {
   LOGFD = openSync(DEVLOG, "a");
@@ -944,7 +948,9 @@ test("Google sign-in: every forged, replayed or mismatched step is refused and c
   await failed("wrong audience", await googleSignIn("admin@org.test", { claims: { aud: "someone-else.apps.googleusercontent.com" } }));
   await failed("multi-audience not issued to us", await googleSignIn("admin@org.test", { claims: { aud: [GCLIENT, "x"], azp: "x" } }));
   await failed("wrong issuer", await googleSignIn("admin@org.test", { claims: { iss: "https://evil.example" } }));
-  await failed("expired", await googleSignIn("admin@org.test", { claims: { exp: now - 3600, iat: now - 7200 } }));
+  await failed("expired (recently issued)", await googleSignIn("admin@org.test", { claims: { iat: now - 300, exp: now - 120 } }));
+  await failed("issued too long ago", await googleSignIn("admin@org.test", { claims: { iat: now - 3600, exp: now + 3600 } }));
+  await failed("no sub", await googleSignIn("admin@org.test", { claims: { sub: undefined } }));
   await failed("issued in the future", await googleSignIn("admin@org.test", { claims: { iat: now + 3600 } }));
   await failed("email not verified", await googleSignIn("admin@org.test", { claims: { email_verified: false } }));
   await failed("email_verified as string", await googleSignIn("admin@org.test", { claims: { email_verified: "true" } }));
@@ -980,7 +986,12 @@ test("Google sessions: forged ids refused, cross-site writes refused, sign-out e
   assert.equal((await req(P, { method: "POST", cookie: s.session, body, headers: { origin: "https://evil.example" } })).status, 403, "other site's Origin");
   assert.equal((await req(P, { method: "POST", cookie: s.session, body, headers: { origin: undefined, "sec-fetch-site": "cross-site" } })).j.error, "cross_origin", "no Origin, cross-site");
   assert.equal((await req(P, { method: "POST", cookie: s.session, body, headers: { origin: undefined } })).j.error, "cross_origin", "no Origin, no Sec-Fetch-Site");
-  assert.notEqual((await req(P, { method: "POST", cookie: s.session, body })).status, 403, "same-origin write accepted");
+  assert.equal((await req(P, { method: "POST", cookie: s.session, body })).status, 201, "same-origin write accepted");
+  // Reads too: a page on another site navigating the browser to the staff API is refused.
+  for (const site of ["cross-site", "same-site", "none"])
+    assert.equal((await req("/api/c/crotona-test/dashboard", { cookie: s.session, headers: { "sec-fetch-site": site } })).j.error, "cross_origin", site);
+  assert.equal((await req("/api/c/crotona-test/coverage?from=" + nyDate(-7) + "&to=" + nyDate(0), { cookie: s.session, headers: { "sec-fetch-site": "cross-site" } })).status, 403);
+  assert.equal((await req("/api/c/crotona-test/dashboard", { cookie: s.session, headers: { "sec-fetch-site": "same-origin" } })).status, 200);
   assert.equal((await req("/api/auth/logout", { method: "POST", cookie: s.session, body: {}, headers: { origin: "https://evil.example" } })).status, 403, "cross-site sign-out refused");
   const out = await req("/api/auth/logout", { method: "POST", cookie: s.session, body: {} });
   assert.equal(out.status, 200); assert.match(out.headers.get("set-cookie"), /^__Host-wwu_s=; .*Max-Age=0/);
@@ -1008,8 +1019,15 @@ test("Google sessions: idle and absolute expiry, removal signs the person out ev
   for (let i = 0; i < 40 && sql(`SELECT COUNT(*) AS n FROM sessions WHERE id_hash='${"e".repeat(64)}'`)[0].n; i++) await new Promise((r) => setTimeout(r, 250));
   assert.equal(sql(`SELECT COUNT(*) AS n FROM sessions WHERE id_hash='${"e".repeat(64)}'`)[0].n, 0, "purged");
   // A person keeps at most 10 sessions: the oldest end first.
-  for (let i = 0; i < 11; i++) await googleSignIn("cap@org.test");
+  const caps = [];
+  for (let i = 0; i < 11; i++) {   // give each session a distinct creation time, in order, so "oldest" is well defined
+    const c = await googleSignIn("cap@org.test"); caps.push(c);
+    const hc = createHash("sha256").update(c.session.split("=")[1]).digest("hex");
+    sql(`UPDATE sessions SET created_at = strftime('%s','now') - 1000 + ${i} WHERE id_hash='${hc}'`);
+  }
   assert.equal(sql("SELECT COUNT(*) AS n FROM sessions WHERE email='cap@org.test'")[0].n, 10);
+  assert.equal((await req("/api/c/me", { cookie: caps[0].session })).j.signed_in, false, "the oldest session ended");
+  assert.equal((await req("/api/c/me", { cookie: caps[10].session })).j.signed_in, true, "the newest is kept");
 });
 
 test("operator rights only through Cloudflare Access: a Google session never reaches the operator console", async () => {
@@ -1074,7 +1092,8 @@ test("operator lead recovery: assign or replace a program's lead (live and pendi
   assert.deepEqual([r.status, r.j.replaced], [200, true]);
   assert.equal(sql("SELECT applied_by FROM orgs WHERE slug='hb-two'")[0].applied_by, "newlead@intake.test");
   assert.deepEqual(sql("SELECT email, role FROM coordinators WHERE org_id=(SELECT id FROM orgs WHERE slug='hb-two') ORDER BY email"),
-    [{ email: "host@intake.test", role: "coordinator" }, { email: "newlead@intake.test", role: "admin" }]);
+    [{ email: "newlead@intake.test", role: "admin" }], "a replaced applicant keeps no access to a pending program");
+  assert.match(sql("SELECT subject FROM audit WHERE action='lead_assigned' ORDER BY seq DESC LIMIT 1")[0].subject, /\|replace:true\|previous_removed$/);
   // One pending program per lead still holds.
   assert.equal((await req("/api/op/programs", { method: "POST", token: OPS(), body: { name: "Other Pending", slug: "other-pending", borough: "Bronx",
     org_type: "faith", lead_email: "busy@intake.test", status: "pending", commitments_confirmed: true } })).status, 201);
@@ -1088,4 +1107,57 @@ test("readiness reports Google sign-in configuration without secrets", async () 
   const r = await req("/api/health/ready");
   assert.equal(r.j.checks.google_signin, true);
   assert.ok(!JSON.stringify(r.j).includes(GSECRET) && !JSON.stringify(r.j).includes(GCLIENT), "no client id or secret");
+});
+
+test("an address is bound to the first Google account that used it; the operator's lead assignment releases it", async () => {
+  assert.ok((await googleSignIn("boundlead@hand.test", { claims: { sub: "acct-A" } })).session);
+  const other = await googleSignIn("boundlead@hand.test", { claims: { sub: "acct-B" } });
+  assert.deepEqual([other.location, other.session], ["/c.html#signin=account", null], "same address, different Google account: refused");
+  assert.ok((await googleSignIn("boundlead@hand.test", { claims: { sub: "acct-A" } })).session, "the bound account still works");
+  assert.equal((await req("/api/op/programs/hand-test/lead", { method: "POST", token: OPS(), body: { email: "boundlead@hand.test" } })).status, 200);
+  assert.ok((await googleSignIn("boundlead@hand.test", { claims: { sub: "acct-B" } })).session, "after operator recovery the new account binds");
+});
+
+test("staff actions through a Google session: handover and pending rules apply exactly as with Access", async () => {
+  const s3 = await googleSignIn("lead3@hand.test");
+  assert.equal((await req("/api/c/hand-test/coordinators/handover", { method: "POST", cookie: s3.session, body: { email: "lead2@hand.test" }, headers: { origin: "https://evil.example" } })).status, 403, "cross-site handover refused");
+  assert.equal((await req("/api/c/hand-test/coordinators/handover", { method: "POST", cookie: s3.session, body: { email: "lead2@hand.test" } })).status, 200);
+  const roles = sql("SELECT email, role FROM coordinators WHERE org_id=(SELECT id FROM orgs WHERE slug='hand-test') AND email IN ('lead2@hand.test','lead3@hand.test') ORDER BY email");
+  assert.deepEqual(roles, [{ email: "lead2@hand.test", role: "admin" }, { email: "lead3@hand.test", role: "coordinator" }]);
+  const sp = await googleSignIn("newlead@intake.test");
+  assert.equal((await req("/api/c/hb-two/coordinators", { method: "POST", cookie: sp.session, body: { email: "x@intake.test", role: "admin" } })).j.error, "admin_after_review");
+  assert.equal((await req("/api/c/hb-two/coordinators/handover", { method: "POST", cookie: sp.session, body: { email: "x@intake.test" } })).j.error, "admin_after_review");
+  // With both an Access token and a session cookie (migration period), the Access identity is the one used.
+  const both = await req("/api/c/me", { token: ADMIN(), cookie: sp.session });
+  assert.deepEqual([both.j.email, both.j.via], ["admin@org.test", "access"]);
+});
+
+test("the last admin cannot be removed or demoted, checked inside the write", async () => {
+  const L2 = jwt({ email: "lead2@hand.test" });
+  const admins = () => sql("SELECT COUNT(*) AS n FROM coordinators WHERE org_id=(SELECT id FROM orgs WHERE slug='hand-test') AND role='admin'")[0].n;
+  assert.equal((await req("/api/c/hand-test/coordinators/remove", { method: "POST", token: L2, body: { email: "boundlead@hand.test" } })).status, 200);
+  assert.equal((await req("/api/c/hand-test/coordinators", { method: "POST", token: L2, body: { email: "co@hand.test", role: "admin" } })).status, 200);
+  assert.equal(admins(), 2, "exactly two admins before the race");
+  const [a, b] = await Promise.all([
+    req("/api/c/hand-test/coordinators/remove", { method: "POST", token: L2, body: { email: "co@hand.test" } }),
+    req("/api/c/hand-test/coordinators/remove", { method: "POST", token: jwt({ email: "co@hand.test" }), body: { email: "lead2@hand.test" } }),
+  ]);
+  assert.ok(admins() >= 1, `never zero admins (statuses ${a.status}/${b.status})`);
+});
+
+test("production defaults: invite-only programs, staff pages ignore Access tokens, '//' refused, test settings flagged", async () => {
+  await stopServer(); writeVars([`DATA_KEY=${KEY2}`], { JOIN_MODE: "", ACCESS_FOR_STAFF: "", WWU_TEST: "" }); await startServer();
+  assert.equal((await req("/api/c/crotona-test/dashboard", { token: ADMIN() })).status, 401, "an Access token is not a staff identity on the public staff API");
+  assert.equal((await req("/api/c/me", { token: OPS() })).j.signed_in, false);
+  assert.equal((await req("/api/op/programs", { token: OPS() })).status, 200, "the operator console still uses Access");
+  const s = await googleSignIn("invited-not@community.test");
+  const me = await req("/api/c/me", { cookie: s.session });
+  assert.deepEqual([me.j.signed_in, me.j.join_open], [true, false]);
+  assert.equal((await req("/api/c/join", { method: "POST", cookie: s.session, body: joinBody({ slug: "invite-only-try" }) })).j.error, "join_by_invitation");
+  assert.equal(sql("SELECT COUNT(*) AS n FROM orgs WHERE slug='invite-only-try'")[0].n, 0);
+  assert.ok((await req("/api/c/crotona-test/dashboard", { cookie: (await googleSignIn("admin@org.test")).session })).status === 200, "staff sign in with Google");
+  for (const p of ["/api//op/programs", "/api/op//programs", "//api/op/programs"]) assert.equal((await req(p, { token: OPS() })).status, 404, p);
+  const ready = await req("/api/health/ready");
+  assert.equal(ready.status, 503); assert.ok(ready.j.problems.includes("test_overrides_set"), "test-only key overrides are flagged outside the test suite");
+  assert.equal(ready.j.checks.self_serve_signup, false);
 });

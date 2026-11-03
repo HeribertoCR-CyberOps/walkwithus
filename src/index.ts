@@ -36,6 +36,9 @@ export interface Env {
   GOOGLE_CLIENT_SECRET?: string; // secret: `wrangler secret put GOOGLE_CLIENT_SECRET`
   GOOGLE_JWKS_JSON?: string;   // tests only: key set used instead of Google's; verification still enforced
   GOOGLE_TOKEN_URL?: string;   // tests only: a loopback (127.0.0.1) token endpoint; any other value is ignored
+  JOIN_MODE?: string;          // "invite" (default): programs are set up by the operator from an intake; "open": self-serve sign-up
+  ACCESS_FOR_STAFF?: string;   // "1" only while migrating staff from Cloudflare Access to Google: staff pages also accept Access
+  WWU_TEST?: string;           // "1" in the test suites only: test overrides above are expected there
   JOIN_PENDING_CAP?: string;   // most programs waiting for review at once (default 25): a sign-up flood cannot bury real ones
   DEBUG?: string;              // "1" = include error message + first stack frame in logs. Local/dev only — never in production.
   RETENTION_HOURS: string;
@@ -506,16 +509,23 @@ async function revealGuard(env: Env, orgId: number, actor: string): Promise<void
 // table and OPERATOR_EMAILS. A session cookie is accepted for a state-changing request only from this site itself.
 interface Who extends Identity { via: "access" | "google"; }
 async function identify(req: Request, env: Env): Promise<Who> {
-  const a = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
-  if (a) return { ...a, via: "access" };
+  // Staff pages accept a Cloudflare Access token only during a migration (ACCESS_FOR_STAFF=1). Once they are public,
+  // Access no longer re-checks its own session in front of them, so a revoked or stolen Access token must not work here.
+  if (env.ACCESS_FOR_STAFF === "1") {
+    const a = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
+    if (a) return { ...a, via: "access" };
+  }
   const email = await sessionEmail(env.DB, req);
   if (!email) throw new HttpError(401, "signin_required");
-  if (req.method !== "GET" && req.method !== "HEAD") {
-    const origin = req.headers.get("origin"), site = req.headers.get("sec-fetch-site");
-    if (!(origin === new URL(req.url).origin || (!origin && site === "same-origin"))) throw new HttpError(403, "cross_origin");
-  }
+  // The cookie travels on top-level navigations from other sites too (SameSite=Lax). The staff API is called only by
+  // this site's own pages, so any request a browser marks as coming from elsewhere is refused, reads included.
+  const origin = req.headers.get("origin"), site = req.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin") throw new HttpError(403, "cross_origin");
+  if (req.method !== "GET" && req.method !== "HEAD" && !(origin === new URL(req.url).origin || (!origin && site === "same-origin")))
+    throw new HttpError(403, "cross_origin");
   return { email, sub: "", via: "google" };
 }
+const joinOpen = (env: Env) => env.JOIN_MODE === "open";
 const googleReady = (env: Env) => !!env.GOOGLE_CLIENT_ID && !!env.GOOGLE_CLIENT_SECRET;
 
 async function coordinator(req: Request, env: Env, slug: string): Promise<{ id: Who; org: Org; role: string }> {
@@ -817,7 +827,10 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     if (rid === "remove") {
       if (!cur) throw new HttpError(404, "no_coordinator");
       if (cur.role === "admin" && admins <= 1) bad("last_admin");
-      await env.DB.prepare("DELETE FROM coordinators WHERE email=? AND org_id=?").bind(email, org.id).run();
+      // The admin count is re-checked inside the write itself, so two admins removing each other at once cannot both win.
+      const del = await env.DB.prepare(`DELETE FROM coordinators WHERE email=?1 AND org_id=?2
+        AND (role<>'admin' OR (SELECT COUNT(*) FROM coordinators WHERE org_id=?2 AND role='admin') > 1)`).bind(email, org.id).run();
+      if (!del.meta.changes) bad("last_admin");
       const ended = await endSessionsIfNoRole(env.DB, email);   // no program left: signed out on every device at once
       await audit(env, org.id, actor, "coordinator_removed", `${target}|${cur.role}->none${ended ? "|sessions_ended" : ""}`);
       await invalidateOrg(org.slug);
@@ -831,8 +844,10 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
       const n = (await env.DB.prepare("SELECT COUNT(*) AS n FROM coordinators WHERE org_id=?").bind(org.id).first<{ n: number }>())?.n ?? 0;
       if (n >= (org.status === "pending" ? MAX_PENDING_COORDINATORS : MAX_COORDINATORS)) bad("too_many_coordinators");
     }
-    await env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,?) ON CONFLICT DO UPDATE SET role=excluded.role")
+    const up = await env.DB.prepare(`INSERT INTO coordinators (email, org_id, role) VALUES (?1,?2,?3) ON CONFLICT DO UPDATE SET role=excluded.role
+      WHERE excluded.role='admin' OR coordinators.role<>'admin' OR (SELECT COUNT(*) FROM coordinators WHERE org_id=?2 AND role='admin') > 1`)
       .bind(email, org.id, r).run();
+    if (!up.meta.changes) bad("last_admin");
     await audit(env, org.id, actor, "coordinator_set", `${target}|${cur?.role ?? "none"}->${r}`);
     await invalidateOrg(org.slug);
     return json({ ok: true });
@@ -984,6 +999,7 @@ async function health(env: Env): Promise<Response> {
   checks.rotation_in_progress = !!env.DATA_KEY_PREV;
   checks.access_configured = !env.ACCESS_AUD.startsWith("REPLACE") && !env.ACCESS_TEAM_DOMAIN.startsWith("REPLACE");
   checks.google_signin = googleReady(env);
+  checks.self_serve_signup = joinOpen(env);
   let dbOk = false;
   try {
     await retry(() => env.DB.prepare("SELECT 1").first());
@@ -1021,7 +1037,7 @@ async function health(env: Env): Promise<Response> {
   if (audit && audit.result && audit.result.ok === false) problems.push("audit_chain_broken");
   if (rk && (rk.failed ?? 0) > 0) problems.push("rekey_unreadable_rows");              // data that no configured key can open
   if (env.TURNSTILE_SECRET) problems.push("turnstile_secret_set_but_ui_not_wired");      // would make both public forms fail
-  if (env.GOOGLE_JWKS_JSON && !env.ACCESS_JWKS_JSON) problems.push("google_test_keys_in_production");   // test-only setting
+  if ((env.GOOGLE_JWKS_JSON || env.GOOGLE_TOKEN_URL || env.ACCESS_JWKS_JSON) && env.WWU_TEST !== "1") problems.push("test_overrides_set");
   return json({ ok: problems.length === 0, version: VERSION, problems, checks }, problems.length ? 503 : 200);
 }
 
@@ -1053,6 +1069,9 @@ function programFields(b: Record<string, unknown>): { name: string; slug: string
 
 async function programJoin(req: Request, env: Env): Promise<Response> {
   const id = await identify(req, env);
+  // Invite mode (default): any Google account can sign in, so self-serve sign-up would let anyone fill the review queue.
+  // Programs are then created by the operator from an intake (POST /api/op/programs), with their lead named.
+  if (!joinOpen(env)) throw new HttpError(403, "join_by_invitation");
   const email = id.email.toLowerCase();
   await limit(env, "join-email", email, 20, 86400);
   await limit(env, "join-net", clientNet(req), 10, 86400);
@@ -1148,13 +1167,20 @@ async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Resp
     if (o.demo === 1) bad("demo_program");
     if (o.status === "declined") bad("program_declined");
     const replace = o.status === "pending" || b.replace === true;   // before review there is only ever one admin
+    const previous = (await env.DB.prepare("SELECT email FROM coordinators WHERE org_id=? AND role='admin' AND email<>?").bind(o.id, lead).all<{ email: string }>()).results;
     const stmts = [];
-    if (o.status === "pending") stmts.push(env.DB.prepare("UPDATE orgs SET applied_by=? WHERE id=?").bind(lead, o.id));
-    if (replace) stmts.push(env.DB.prepare("UPDATE coordinators SET role='coordinator' WHERE org_id=? AND role='admin' AND email<>?").bind(o.id, lead));
+    if (o.status === "pending") {
+      // Under review the applicant is replaced outright: a replaced (possibly fraudulent) applicant keeps no access.
+      stmts.push(env.DB.prepare("UPDATE orgs SET applied_by=? WHERE id=?").bind(lead, o.id));
+      stmts.push(env.DB.prepare("DELETE FROM coordinators WHERE org_id=? AND role='admin' AND email<>?").bind(o.id, lead));
+    } else if (replace) stmts.push(env.DB.prepare("UPDATE coordinators SET role='coordinator' WHERE org_id=? AND role='admin' AND email<>?").bind(o.id, lead));
     stmts.push(env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,'admin') ON CONFLICT DO UPDATE SET role='admin'").bind(lead, o.id));
+    // Recovery is the one place a Google-account binding is released: the operator has confirmed the person in person.
+    stmts.push(env.DB.prepare("DELETE FROM google_identities WHERE email=?").bind(lead));
     try { await env.DB.batch(stmts); }
     catch (e) { if (String(e).includes("UNIQUE") && String(e).includes("applied_by")) throw new HttpError(409, "application_pending"); throw e; }
-    await audit(env, o.id, id.email, "lead_assigned", `lead:${(await hmac(env.HMAC_KEY, "email|" + lead)).slice(0, 16)}|replace:${replace}`);
+    if (o.status === "pending") for (const p of previous) await endSessionsIfNoRole(env.DB, p.email);
+    await audit(env, o.id, id.email, "lead_assigned", `lead:${(await hmac(env.HMAC_KEY, "email|" + lead)).slice(0, 16)}|replace:${replace}${o.status === "pending" && previous.length ? "|previous_removed" : ""}`);
     await invalidateOrg(o.slug);
     return json({ ok: true, slug: o.slug, lead, replaced: replace });
   }
@@ -1199,7 +1225,7 @@ async function authApi(req: Request, env: Env, rest: string[]): Promise<Response
   if (!googleReady(env)) return redirect("/c.html#signin=unavailable");
   const redirectUri = new URL(req.url).origin + "/api/auth/google/callback";
   if (step === "start") {
-    await limit(env, "auth-start", clientNet(req), 30, 3600);
+    await limit(env, "auth-start", clientNet(req), 300, 3600);   // loose: a school or carrier network is shared
     const { flow, cookie, challenge } = await newFlow(env.DATA_KEY);
     const u = new URL(GOOGLE_AUTH_URL);
     u.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID!, redirect_uri: redirectUri, response_type: "code",
@@ -1207,9 +1233,9 @@ async function authApi(req: Request, env: Env, rest: string[]): Promise<Response
       prompt: "select_account" }).toString();
     return redirect(u.toString(), [cookie]);
   }
-  await limit(env, "auth-callback", clientNet(req), 30, 3600);
+  await limit(env, "auth-callback", clientNet(req), 300, 3600);
   const q = new URL(req.url).searchParams;
-  const fail = (why: string) => { log("info", "signin_failed", { why }); return redirect("/c.html#signin=failed", [clearCookie(FLOW_COOKIE)]); };
+  const fail = (why: string, shown = "failed") => { log("info", "signin_failed", { why }); return redirect("/c.html#signin=" + shown, [clearCookie(FLOW_COOKIE)]); };
   if (q.get("error")) return fail("cancelled");
   const code = q.get("code") || "", state = q.get("state") || "";
   if (!code || code.length > 2048 || state.length !== 43) return fail("params");
@@ -1217,8 +1243,14 @@ async function authApi(req: Request, env: Env, rest: string[]): Promise<Response
   if (!flow) return fail("state");
   const idt = await exchangeCode(code, env.GOOGLE_CLIENT_ID!, env.GOOGLE_CLIENT_SECRET!, redirectUri, flow.verifier, env.GOOGLE_TOKEN_URL);
   if (!idt) return fail("exchange");
-  const email = await verifyIdToken(idt, env.GOOGLE_CLIENT_ID!, flow.nonce, env.GOOGLE_JWKS_JSON);
-  if (!email) return fail("token");
+  const g = await verifyIdToken(idt, env.GOOGLE_CLIENT_ID!, flow.nonce, env.GOOGLE_JWKS_JSON);
+  if (!g) return fail("token");
+  const email = g.email;
+  // An address belongs to the first Google account that signs in with it; another account with the same address is refused.
+  await env.DB.prepare("INSERT INTO google_identities (email, sub, bound_at) VALUES (?,?,?) ON CONFLICT DO NOTHING")
+    .bind(email, g.sub, Math.floor(Date.now() / 1000)).run();
+  const bound = await env.DB.prepare("SELECT sub FROM google_identities WHERE email=?").bind(email).first<{ sub: string }>();
+  if (!bound || bound.sub !== g.sub) return fail("account_mismatch", "account");
   const sid = await createSession(env.DB, email);
   // Sign-ins of program staff go into the audit chain (by keyed hash, never the address); other sign-ins only open
   // the "start a program" form and are not recorded beyond their session.
@@ -1250,11 +1282,11 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
     let id: Who;
     try { id = await identify(req, env); }
     // Signed out is a normal state for the staff page, not an error: it shows the sign-in instead.
-    catch (e) { if (e instanceof HttpError && e.status === 401) return json({ signed_in: false, email: null, orgs: [], operator: false, google: googleReady(env) }); throw e; }
+    catch (e) { if (e instanceof HttpError && e.status === 401) return json({ signed_in: false, email: null, orgs: [], operator: false, google: googleReady(env), join_open: joinOpen(env) }); throw e; }
     const { results } = await env.DB.prepare(
       "SELECT o.slug, o.name, o.status, c.role, (o.applied_by IS NOT NULL AND o.applied_by = c.email) AS applied FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=? AND o.active=1 AND o.status<>'declined'").bind(id.email).all();
     // Operator rights come only through Cloudflare Access (the one seat), never through a Google session.
-    return json({ signed_in: true, email: id.email, via: id.via, orgs: results, operator: id.via === "access" && isOperator(env, id.email) });
+    return json({ signed_in: true, email: id.email, via: id.via, orgs: results, operator: id.via === "access" && isOperator(env, id.email), join_open: joinOpen(env) });
   }
   if (p[1] === "c" && p[2] === "join" && p.length === 3 && req.method === "POST") return await programJoin(req, env);
   if (p[1] === "op") return await operatorApi(req, env, p.slice(2));
@@ -1265,6 +1297,8 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
+    // "//" is refused: path-based protection in front of the Worker must see the same path the router acts on.
+    if (url.pathname.includes("//")) return new Response("Not found", { status: 404, headers: { "content-type": "text/plain", "cache-control": "no-store" } });
     const p = url.pathname.split("/").filter(Boolean);
     if (p[0] !== "api") return env.ASSETS.fetch(req);
     const rid = crypto.randomUUID();
