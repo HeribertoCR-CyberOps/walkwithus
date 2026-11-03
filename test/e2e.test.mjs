@@ -1106,7 +1106,10 @@ test("operator lead recovery: assign or replace a program's lead (live and pendi
 test("readiness reports Google sign-in configuration without secrets", async () => {
   const r = await req("/api/health/ready");
   assert.equal(r.j.checks.google_signin, true);
-  assert.ok(!JSON.stringify(r.j).includes(GSECRET) && !JSON.stringify(r.j).includes(GCLIENT), "no client id or secret");
+  // Leak check, not URL validation: neither configured value may appear anywhere in the public readiness answer.
+  const body = JSON.stringify(r.j), lit = (x) => new RegExp(x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  assert.doesNotMatch(body, lit(GSECRET), "no client secret");
+  assert.doesNotMatch(body, lit(GCLIENT), "no client id");
 });
 
 test("an address is bound to the first Google account that used it; the operator's lead assignment releases it", async () => {
