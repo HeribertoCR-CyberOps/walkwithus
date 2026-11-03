@@ -5,7 +5,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { generateKeyPairSync, sign, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, sign, randomBytes, randomUUID, createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { writeFileSync, rmSync, openSync, readFileSync, mkdirSync } from "node:fs";
 
 process.env.CI = "1"; process.env.WRANGLER_SEND_METRICS = "false";
@@ -14,6 +15,12 @@ const TEAM = "test.cloudflareaccess.com", AUD = "test-aud";
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const { publicKey: rogueKey, privateKey: roguePriv } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const KID = "k1";
+// Google sign-in: a separate key pair, and a fake Google token endpoint on loopback that behaves like the real one
+// (client authentication, one-time codes, PKCE S256 and redirect_uri checks). The Worker still verifies every claim.
+const { publicKey: gPub, privateKey: gPriv } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const GKID = "g1", GCLIENT = "test-client.apps.googleusercontent.com", GSECRET = "test-google-secret", IDP_PORT = 8797;
+const idpCodes = new Map();   // code -> { claims, challenge, used, redirect }
+let idp;
 let proc, LOGFD; const DEVLOG = ".wrangler/test-dev.log"; mkdirSync(".wrangler", { recursive: true });  const devTail = () => { try { return readFileSync(DEVLOG, "utf8").slice(-3000); } catch { return ""; } };
 
 const b64u = (b) => Buffer.from(b).toString("base64url");
@@ -24,11 +31,33 @@ function jwt(claims, { key = privateKey, kid = KID, alg = "RS256" } = {}) {
   const s = b64u(sign("RSA-SHA256", Buffer.from(`${h}.${p}`), key));
   return `${h}.${p}.${s}`;
 }
+function gjwt(claims, { key = gPriv, kid = GKID, alg = "RS256" } = {}) {
+  const h = b64u(JSON.stringify({ alg, kid, typ: "JWT" }));
+  const now = Math.floor(Date.now() / 1000);
+  const p = b64u(JSON.stringify({ iss: "https://accounts.google.com", aud: GCLIENT, iat: now, exp: now + 3600, email_verified: true, sub: "1", ...claims }));
+  return `${h}.${p}.${alg === "none" ? "" : b64u(sign("RSA-SHA256", Buffer.from(`${h}.${p}`), key))}`;
+}
+const cookiesOf = (r) => Object.fromEntries((r.headers.getSetCookie?.() || []).map((c) => { const [kv] = c.split(";"); const i = kv.indexOf("="); return [kv.slice(0, i), kv.slice(i + 1)]; }));
+/** Run the whole Google sign-in as a browser would. `tamper` lets a test attack one step. Returns { status, location, session }. */
+async function googleSignIn(email, { claims = {}, opts, tamper = {} } = {}) {
+  const ip = "198.51.100." + Math.floor(Math.random() * 250);
+  const st = await fetch(BASE + "/api/auth/google/start", { redirect: "manual", headers: { connection: "close", "cf-connecting-ip": ip } });
+  const loc = new URL(st.headers.get("location")), q = loc.searchParams, flow = cookiesOf(st)["__Host-wwu_oa"];
+  const code = "c-" + randomUUID();
+  idpCodes.set(code, { claims: { email, nonce: q.get("nonce"), ...claims }, opts, challenge: q.get("code_challenge"), redirect: q.get("redirect_uri"), idToken: tamper.idToken });
+  const cbq = new URLSearchParams({ code: tamper.code ?? code, state: tamper.state ?? q.get("state"), ...(tamper.error ? { error: tamper.error } : {}) });
+  const ck = tamper.flowCookie === null ? undefined : `__Host-wwu_oa=${tamper.flowCookie ?? flow}`;
+  const cb = await fetch(BASE + "/api/auth/google/callback?" + cbq, { redirect: "manual", headers: { connection: "close", "cf-connecting-ip": ip, ...(ck ? { cookie: ck } : {}) } });
+  const s = cookiesOf(cb)["__Host-wwu_s"];
+  return { start: st, startUrl: loc, code, flow, status: cb.status, location: cb.headers.get("location"), session: s ? `__Host-wwu_s=${s}` : null, setCookies: cb.headers.getSetCookie() };
+}
 const ADMIN = () => jwt({ email: "admin@org.test" });
 const COORD = () => jwt({ email: "coord@org.test" });
 
-async function req(path, { method = "GET", body, token, ip, headers = {} } = {}) {
+async function req(path, { method = "GET", body, token, ip, headers = {}, cookie } = {}) {
   const h = { connection: "close", ...headers };   // no keep-alive reuse: sync CLI calls let idle sockets go stale
+  if (cookie) { h.cookie = cookie; if (method !== "GET" && !("origin" in headers)) h.origin = BASE; }
+  for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];   // a test may remove a header by setting it undefined
   if (body !== undefined) h["content-type"] = "application/json";
   if (token) h["cf-access-jwt-assertion"] = token;
   h["cf-connecting-ip"] = ip || "203.0.113." + Math.floor(Math.random() * 250);
@@ -80,7 +109,9 @@ function writeVars(extra) {
   const jwk = publicKey.export({ format: "jwk" });
   writeFileSync(".dev.vars", [
     `HMAC_KEY=${HKEY}`, `ACCESS_TEAM_DOMAIN=${TEAM}`, `ACCESS_AUD=${AUD}`,
-    `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] })}`, "OPERATOR_EMAILS=ops@maintainer.test", "JOIN_PENDING_CAP=3", ...extra,
+    `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: KID, alg: "RS256" }] })}`, "OPERATOR_EMAILS=ops@maintainer.test", "JOIN_PENDING_CAP=3",
+    `GOOGLE_CLIENT_ID=${GCLIENT}`, `GOOGLE_CLIENT_SECRET=${GSECRET}`, `GOOGLE_TOKEN_URL=http://127.0.0.1:${IDP_PORT}/token`,
+    `GOOGLE_JWKS_JSON=${JSON.stringify({ keys: [{ ...gPub.export({ format: "jwk" }), kid: GKID, alg: "RS256" }] })}`, ...extra,
   ].join("\n") + "\n");
 }
 async function startServer() {
@@ -103,6 +134,19 @@ async function stopServer() {
 }
 
 before(async () => {
+  idp = createServer((rq, rs) => {
+    let buf = ""; rq.on("data", (c) => { buf += c; }); rq.on("end", () => {
+      const f = new URLSearchParams(buf), c = idpCodes.get(f.get("code"));
+      const fail = (e) => { rs.writeHead(400, { "content-type": "application/json" }); rs.end(JSON.stringify({ error: e })); };
+      if (rq.url !== "/token" || f.get("client_id") !== GCLIENT || f.get("client_secret") !== GSECRET) return fail("invalid_client");
+      if (!c || c.used) return fail("invalid_grant");                                   // codes are single-use
+      c.used = true;
+      if (f.get("grant_type") !== "authorization_code" || f.get("redirect_uri") !== c.redirect) return fail("invalid_grant");
+      if (createHash("sha256").update(f.get("code_verifier") || "").digest("base64url") !== c.challenge) return fail("invalid_grant");   // PKCE
+      rs.writeHead(200, { "content-type": "application/json" }); rs.end(JSON.stringify({ id_token: c.idToken ?? gjwt(c.claims, c.opts), token_type: "Bearer" }));
+    });
+  });
+  await new Promise((r) => idp.listen(IDP_PORT, "127.0.0.1", r));
   try { await fetch(BASE + "/api/health"); throw new Error(`port ${PORT} already in use — stop the other dev server first`); }
   catch (e) { if (String(e.message).startsWith("port")) throw e; }
   rmSync(PERSIST, { recursive: true, force: true });
@@ -134,6 +178,7 @@ before(async () => {
 });
 after(async () => {
   await stopServer().catch(() => {});
+  idp?.close();
   rmSync(".dev.vars", { force: true });
 });
 
@@ -667,15 +712,15 @@ test("program sign-up: Access-verified lead, strict input, pending until an oper
   for (let dow = 0; dow < 7; dow++) assert.equal((await req("/api/c/mott-haven/windows", { method: "POST", token: LEAD(), body: { corner_id: c.j.id, dow, start: "00:00", end: "23:45" } })).status, 201);
   assert.equal((await req("/api/c/mott-haven/dashboard", { token: ADMIN() })).j.error, "not_a_coordinator_for_org", "other programs' admins see nothing");
   // Operator review.
-  assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/op/programs", { token: ADMIN() })), [403, "operator_only"]);
-  assert.equal((await req("/api/c/op/programs")).status, 401);
+  assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/op/programs", { token: ADMIN() })), [403, "operator_only"]);
+  assert.equal((await req("/api/op/programs")).status, 401);
   assert.equal((await req("/api/c/me", { token: OPS() })).j.operator, true);
-  const list = await req("/api/c/op/programs", { token: OPS() });
+  const list = await req("/api/op/programs", { token: OPS() });
   assert.equal(list.j.programs[0].slug, "mott-haven", "pending programs first");
   assert.deepEqual([list.j.programs[0].status, list.j.programs[0].lead, list.j.programs[0].corners, list.j.programs[0].windows], ["pending", "lead@newprog.test", 1, 7]);
-  assert.equal((await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: LEAD(), body: {} })).status, 403, "a lead cannot approve their own program");
-  assert.equal((await req("/api/c/op/programs/demo-test/approve", { method: "POST", token: OPS(), body: {} })).j.error, "demo_program");
-  const ap = await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} });
+  assert.equal((await req("/api/op/programs/mott-haven/approve", { method: "POST", token: LEAD(), body: {} })).status, 403, "a lead cannot approve their own program");
+  assert.equal((await req("/api/op/programs/demo-test/approve", { method: "POST", token: OPS(), body: {} })).j.error, "demo_program");
+  const ap = await req("/api/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} });
   assert.deepEqual([ap.status, ap.j.status, ap.j.changed], [200, "live", true]);
   const pub = await req("/api/o/mott-haven");
   assert.deepEqual([pub.status, pub.j.accepting_walks, pub.j.corners.length], [200, false, 1], "live, but no walks until two adults are approved");
@@ -759,22 +804,22 @@ test("schedule edits: admins see and remove coverage windows; coordinators canno
 });
 
 test("operator decline: program disappears, its links stop, its lead cannot open it; sign-up queue is capped", async () => {
-  const held = await req("/api/c/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: {} });
+  const held = await req("/api/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: {} });
   assert.deepEqual([held.status, held.j.error], [409, "walks_pending"], "a live program with booked walks is not taken offline blindly");
   assert.ok(held.j.walks >= 1);
   assert.equal(sql("SELECT status FROM orgs WHERE slug='mott-haven'")[0].status, "live");
-  const dec = await req("/api/c/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: { force: true } });
+  const dec = await req("/api/op/programs/mott-haven/decline", { method: "POST", token: OPS(), body: { force: true } });
   assert.deepEqual([dec.status, dec.j.status], [200, "declined"]);
   assert.equal((await req("/api/o/mott-haven")).status, 404);
   assert.equal((await req("/api/v/me", { method: "POST", body: { token: mhTok } })).status, 401, "volunteer links stop with the program");
   assert.equal((await req("/api/c/mott-haven/dashboard", { token: LEAD() })).status, 404);
   assert.deepEqual((await req("/api/c/me", { token: LEAD() })).j.orgs, []);
-  assert.equal((await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} })).j.status, "live", "an operator can reverse it");
+  assert.equal((await req("/api/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} })).j.status, "live", "an operator can reverse it");
   assert.equal((await req("/api/v/me", { method: "POST", body: { token: mhTok } })).status, 200);
   // JOIN_PENDING_CAP=3 in this test run: the 4th waiting program is refused until one is reviewed.
   for (let i = 1; i <= 3; i++) assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: `l${i}@q.test` }), body: joinBody({ slug: `queue-${i}` }) })).status, 201);
   assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/join", { method: "POST", token: jwt({ email: "l4@q.test" }), body: joinBody({ slug: "queue-4" }) })), [429, "review_queue_full"]);
-  assert.equal((await req("/api/c/op/programs/queue-1/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
+  assert.equal((await req("/api/op/programs/queue-1/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
   assert.equal((await req("/api/c/join", { method: "POST", token: jwt({ email: "l4@q.test" }), body: joinBody({ slug: "queue-4" }) })).status, 201);
   assert.equal((await req("/api/health/ready")).j.checks.programs.total, 6, "the probe counts live programs only (5 seeded + mott-haven)");
 });
@@ -788,12 +833,12 @@ test("v1.3.1 hardening: sign-up identity, pending limits, booked-walk notices, s
   assert.deepEqual(((r) => [r.status, r.j.error])(await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: "victim@x.test", role: "admin" } })), [400, "admin_after_review"]);
   assert.equal((await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: "victim@x.test", role: "coordinator" } })).status, 200);
   // … and being listed on someone else's pending program does not stop that person from starting their own.
-  assert.equal((await req("/api/c/op/programs/queue-3/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
+  assert.equal((await req("/api/op/programs/queue-3/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
   const own = await req("/api/c/join", { method: "POST", token: jwt({ email: "victim@x.test" }), body: joinBody({ slug: "victim-own" }) });
   assert.equal(own.status, 201, JSON.stringify(own.j));
   const me = await req("/api/c/me", { token: jwt({ email: "victim@x.test" }) });
   assert.deepEqual(me.j.orgs.map((o) => [o.slug, o.role, o.applied]).sort(), [["queue-2", "coordinator", 0], ["victim-own", "admin", 1]]);
-  const q2 = (await req("/api/c/op/programs", { token: OPS() })).j.programs.find((x) => x.slug === "queue-2");
+  const q2 = (await req("/api/op/programs", { token: OPS() })).j.programs.find((x) => x.slug === "queue-2");
   assert.deepEqual([q2.lead, q2.other_coordinators], ["l2@q.test", "victim@x.test (coordinator)"], "the reviewer sees who signed up, separately from people the lead added");
   // Pending programs: at most 5 people.
   for (const n of [3, 4, 5]) assert.equal((await req("/api/c/queue-2/coordinators", { method: "POST", token: L2(), body: { email: `c${n}@q.test`, role: "coordinator" } })).status, 200);
@@ -807,7 +852,7 @@ test("v1.3.1 hardening: sign-up identity, pending limits, booked-walk notices, s
   for (let i = 0; i < 11; i++) r = await req("/api/c/join", { method: "POST", ip, token: jwt({ email: `net${i}@q.test` }), body: joinBody({ slug: `net-${i}`, ack_lead: false }) });
   assert.deepEqual([r.status, r.j.error], [429, "rate_limited"]);
   // Removing hours that already have a booked walk tells the coordinator to call that family.
-  assert.equal((await req("/api/c/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} })).j.status, "live");
+  assert.equal((await req("/api/op/programs/mott-haven/approve", { method: "POST", token: OPS(), body: {} })).j.status, "live");
   const dow = new Date(nyDate(1) + "T12:00:00Z").getUTCDay();
   const win = (await req("/api/c/mott-haven/dashboard", { token: LEAD() })).j.windows.find((w) => w.dow === dow);
   const rm = await req(`/api/c/mott-haven/windows/${win.id}/remove`, { method: "POST", token: LEAD(), body: {} });
@@ -826,7 +871,7 @@ test("v1.3.1 hardening: sign-up identity, pending limits, booked-walk notices, s
 test("operator sets up a program from an intake and assigns its lead; the lead then runs it", async () => {
   const body = { name: "Highbridge Walk Partners", slug: "highbridge", borough: "Bronx", org_type: "nonprofit", lead_email: "Host@Intake.test",
     status: "live", commitments_confirmed: true };
-  const OP = (b, t = OPS()) => req("/api/c/op/programs", { method: "POST", token: t, body: b });
+  const OP = (b, t = OPS()) => req("/api/op/programs", { method: "POST", token: t, body: b });
   assert.equal((await OP(body, LEAD())).j.error, "operator_only", "only operators");
   for (const [o, code] of [[{ commitments_confirmed: false }, "commitments_required"], [{ status: "open" }, "bad_status"],
       [{ lead_email: "nope" }, "bad_email"], [{ slug: "join" }, "slug_reserved"], [{ slug: "mott-haven" }, "slug_taken"], [{ extra: 1 }, "unknown_field:extra"]]) {
@@ -837,7 +882,7 @@ test("operator sets up a program from an intake and assigns its lead; the lead t
   assert.equal((await req("/api/o/highbridge")).status, 200, "live at once: the operator verified it");
   const me = await req("/api/c/me", { token: jwt({ email: "host@intake.test" }) });
   assert.deepEqual(me.j.orgs, [{ slug: "highbridge", name: "Highbridge Walk Partners", status: "live", role: "admin", applied: 1 }]);
-  const list = (await req("/api/c/op/programs", { token: OPS() })).j.programs.find((p) => p.slug === "highbridge");
+  const list = (await req("/api/op/programs", { token: OPS() })).j.programs.find((p) => p.slug === "highbridge");
   assert.deepEqual([list.lead, list.status], ["host@intake.test", "live"]);
   const a = sql("SELECT actor, action, subject FROM audit WHERE action='program_created' ORDER BY seq DESC LIMIT 1")[0];
   assert.equal(a.actor, "ops@maintainer.test"); assert.match(a.subject, /^status:live\|lead:[0-9a-f]{16}$/, "the lead's email is not in the audit chain");
@@ -848,4 +893,199 @@ test("operator sets up a program from an intake and assigns its lead; the lead t
   // A pending set-up respects the one-pending-per-lead rule.
   assert.equal((await OP({ ...body, slug: "hb-two", status: "pending" })).status, 201);
   assert.equal((await OP({ ...body, slug: "hb-three", status: "pending" })).j.error, "application_pending");
+});
+
+// ---------------------------------------------------------------- v1.5.0: Google sign-in for program staff
+test("Google sign-in: authorization request is PKCE S256 + state + nonce, email scope only, flow cookie sealed and host-locked", async () => {
+  const st = await fetch(BASE + "/api/auth/google/start", { redirect: "manual", headers: { connection: "close" } });
+  assert.equal(st.status, 303);
+  const u = new URL(st.headers.get("location")), q = u.searchParams;
+  assert.equal(u.origin + u.pathname, "https://accounts.google.com/o/oauth2/v2/auth");
+  assert.deepEqual([q.get("client_id"), q.get("response_type"), q.get("scope"), q.get("code_challenge_method"), q.get("redirect_uri")],
+    [GCLIENT, "code", "openid email", "S256", BASE + "/api/auth/google/callback"]);
+  assert.match(q.get("state"), /^[A-Za-z0-9_-]{43}$/); assert.match(q.get("nonce"), /^[A-Za-z0-9_-]{43}$/); assert.match(q.get("code_challenge"), /^[A-Za-z0-9_-]{43}$/);
+  const raw = st.headers.getSetCookie().find((c) => c.startsWith("__Host-wwu_oa="));
+  assert.match(raw, /; Path=\/; Max-Age=600; HttpOnly; Secure; SameSite=Lax$/);
+  const val = decodeURIComponent(raw.split(";")[0].split("=").slice(1).join("="));
+  assert.ok(val.startsWith("v1.") && !val.includes(q.get("state")) && !val.includes(q.get("nonce")), "state/nonce/verifier sealed, not readable");
+  assert.equal(st.headers.get("referrer-policy"), "no-referrer");
+});
+
+test("Google sign-in: a staff member signs in, gets a hashed server-side session, and sees only their program", async () => {
+  const s = await googleSignIn("Admin@Org.Test");
+  assert.deepEqual([s.status, s.location], [303, "/c.html"]);
+  assert.ok(s.session, "session cookie set");
+  const raw = s.setCookies.find((c) => c.startsWith("__Host-wwu_s="));
+  assert.match(raw, /; Path=\/; Max-Age=604800; HttpOnly; Secure; SameSite=Lax$/);
+  assert.ok(s.setCookies.some((c) => c.startsWith("__Host-wwu_oa=;") && /Max-Age=0/.test(c)), "flow cookie cleared");
+  const sid = s.session.split("=")[1];
+  const rows = sql("SELECT id_hash, email FROM sessions WHERE email='admin@org.test'");
+  assert.ok(rows.length >= 1 && rows.every((r) => r.id_hash !== sid && /^[0-9a-f]{64}$/.test(r.id_hash)), "only the SHA-256 of the session id is stored");
+  const me = await req("/api/c/me", { cookie: s.session });
+  assert.deepEqual([me.status, me.j.signed_in, me.j.email, me.j.via, me.j.operator], [200, true, "admin@org.test", "google", false]);
+  const anon = await req("/api/c/me");
+  assert.deepEqual([anon.status, anon.j.signed_in, anon.j.email, anon.j.orgs, anon.j.operator, anon.j.google], [200, false, null, [], false, true], "signed out: a normal answer, nothing revealed");
+  assert.ok(me.j.orgs.some((o) => o.slug === "crotona-test" && o.role === "admin"));
+  const d = await req("/api/c/crotona-test/dashboard", { cookie: s.session });
+  assert.deepEqual([d.status, d.j.you.via], [200, "google"]);
+  assert.equal((await req("/api/c/other-org/dashboard", { cookie: s.session })).j.error, "not_a_coordinator_for_org", "another program stays closed");
+  const a = sql("SELECT org_id, actor, action FROM audit WHERE action='signin_google' ORDER BY seq DESC LIMIT 1")[0];
+  assert.equal(a.org_id, 0); assert.match(a.actor, /^staff:[0-9a-f]{16}$/, "staff sign-in audited by keyed hash, no address");
+});
+
+test("Google sign-in: every forged, replayed or mismatched step is refused and creates no session", async () => {
+  const failed = async (label, r) => {
+    assert.equal(r.status, 303, label); assert.equal(r.location, "/c.html#signin=failed", label); assert.equal(r.session, null, label);
+  };
+  const now = Math.floor(Date.now() / 1000);
+  await failed("forged signature", await googleSignIn("admin@org.test", { opts: { key: roguePriv } }));
+  await failed("unknown key id", await googleSignIn("admin@org.test", { opts: { kid: "nope" } }));
+  await failed("alg none", await googleSignIn("admin@org.test", { opts: { alg: "none" } }));
+  await failed("wrong audience", await googleSignIn("admin@org.test", { claims: { aud: "someone-else.apps.googleusercontent.com" } }));
+  await failed("multi-audience not issued to us", await googleSignIn("admin@org.test", { claims: { aud: [GCLIENT, "x"], azp: "x" } }));
+  await failed("wrong issuer", await googleSignIn("admin@org.test", { claims: { iss: "https://evil.example" } }));
+  await failed("expired", await googleSignIn("admin@org.test", { claims: { exp: now - 3600, iat: now - 7200 } }));
+  await failed("issued in the future", await googleSignIn("admin@org.test", { claims: { iat: now + 3600 } }));
+  await failed("email not verified", await googleSignIn("admin@org.test", { claims: { email_verified: false } }));
+  await failed("email_verified as string", await googleSignIn("admin@org.test", { claims: { email_verified: "true" } }));
+  await failed("nonce from another sign-in", await googleSignIn("admin@org.test", { claims: { nonce: "x".repeat(43) } }));
+  await failed("no nonce", await googleSignIn("admin@org.test", { claims: { nonce: undefined } }));
+  await failed("state mismatch", await googleSignIn("admin@org.test", { tamper: { state: "y".repeat(43) } }));
+  await failed("no flow cookie (login CSRF)", await googleSignIn("admin@org.test", { tamper: { flowCookie: null } }));
+  await failed("tampered flow cookie", await googleSignIn("admin@org.test", { tamper: { flowCookie: encodeURIComponent("v1.AAAA" + "B".repeat(80)) } }));
+  await failed("code the provider never issued", await googleSignIn("admin@org.test", { tamper: { code: "never-issued" } }));
+  await failed("user cancelled at Google", await googleSignIn("admin@org.test", { tamper: { error: "access_denied" } }));
+  // A flow cookie from one sign-in cannot complete another (state is bound to its own cookie).
+  const a = await googleSignIn("admin@org.test", { tamper: { flowCookie: null } });
+  const b = await fetch(BASE + "/api/auth/google/start", { redirect: "manual", headers: { connection: "close" } });
+  const r = await fetch(BASE + "/api/auth/google/callback?" + new URLSearchParams({ code: a.code, state: a.startUrl.searchParams.get("state") }),
+    { redirect: "manual", headers: { connection: "close", cookie: "__Host-wwu_oa=" + cookiesOf(b)["__Host-wwu_oa"] } });
+  assert.equal(r.headers.get("location"), "/c.html#signin=failed", "another sign-in's flow cookie");
+  // Replay: a code that worked once never works again.
+  const ok = await googleSignIn("coord@org.test");
+  assert.ok(ok.session);
+  const replay = await fetch(BASE + "/api/auth/google/callback?" + new URLSearchParams({ code: ok.code, state: ok.startUrl.searchParams.get("state") }),
+    { redirect: "manual", headers: { connection: "close", cookie: "__Host-wwu_oa=" + ok.flow } });
+  assert.equal(replay.headers.get("location"), "/c.html#signin=failed", "replayed code");
+  assert.equal(cookiesOf(replay)["__Host-wwu_s"], undefined);
+  for (const p of ["/api/auth/google/other", "/api/auth/github/start", "/api/auth/google"]) assert.equal((await req(p)).status, 404, p);
+});
+
+test("Google sessions: forged ids refused, cross-site writes refused, sign-out ends the session", async () => {
+  for (const c of ["__Host-wwu_s=" + "A".repeat(43), "__Host-wwu_s=short", "__Host-wwu_s=" + "A".repeat(42) + "*", "wwu_s=" + "A".repeat(43)])
+    assert.equal((await req("/api/c/me", { cookie: c })).j.signed_in, false, c);
+  const s = await googleSignIn("coord@org.test");
+  const P = "/api/c/crotona-test/closures";
+  const body = { day: nyDate(30), reason: "weather" };
+  assert.equal((await req(P, { method: "POST", cookie: s.session, body, headers: { origin: "https://evil.example" } })).status, 403, "other site's Origin");
+  assert.equal((await req(P, { method: "POST", cookie: s.session, body, headers: { origin: undefined, "sec-fetch-site": "cross-site" } })).j.error, "cross_origin", "no Origin, cross-site");
+  assert.equal((await req(P, { method: "POST", cookie: s.session, body, headers: { origin: undefined } })).j.error, "cross_origin", "no Origin, no Sec-Fetch-Site");
+  assert.notEqual((await req(P, { method: "POST", cookie: s.session, body })).status, 403, "same-origin write accepted");
+  assert.equal((await req("/api/auth/logout", { method: "POST", cookie: s.session, body: {}, headers: { origin: "https://evil.example" } })).status, 403, "cross-site sign-out refused");
+  const out = await req("/api/auth/logout", { method: "POST", cookie: s.session, body: {} });
+  assert.equal(out.status, 200); assert.match(out.headers.get("set-cookie"), /^__Host-wwu_s=; .*Max-Age=0/);
+  assert.equal((await req("/api/c/me", { cookie: s.session })).j.signed_in, false, "ended on the server, not just in the browser");
+});
+
+test("Google sessions: idle and absolute expiry, removal signs the person out everywhere, maintenance purges", async () => {
+  const s = await googleSignIn("bulk@org.test"), s2 = await googleSignIn("bulk@org.test");
+  const h = createHash("sha256").update(s.session.split("=")[1]).digest("hex");
+  sql(`UPDATE sessions SET last_seen = last_seen - 13*3600 WHERE id_hash='${h}'`);
+  assert.equal((await req("/api/c/me", { cookie: s.session })).j.signed_in, false, "12 idle hours");
+  assert.equal(sql(`SELECT COUNT(*) AS n FROM sessions WHERE id_hash='${h}'`)[0].n, 0, "expired row deleted on sight");
+  const s3 = await googleSignIn("bulk@org.test");
+  const h3 = createHash("sha256").update(s3.session.split("=")[1]).digest("hex");
+  sql(`UPDATE sessions SET expires_at = created_at + 1 WHERE id_hash='${h3}'`);
+  assert.equal((await req("/api/c/me", { cookie: s3.session })).j.signed_in, false, "7-day absolute limit");
+  assert.equal((await req("/api/c/me", { cookie: s2.session })).status, 200);
+  // Removed from their only program: every device is signed out at once.
+  assert.equal((await req("/api/c/crotona-test/coordinators/remove", { method: "POST", token: ADMIN(), body: { email: "bulk@org.test" } })).status, 200);
+  assert.equal((await req("/api/c/me", { cookie: s2.session })).j.signed_in, false, "removed: signed out everywhere");
+  assert.match(sql("SELECT subject FROM audit WHERE action='coordinator_removed' ORDER BY seq DESC LIMIT 1")[0].subject, /\|sessions_ended$/);
+  // Maintenance deletes stale rows.
+  sql(`INSERT INTO sessions (id_hash, email, created_at, last_seen, expires_at) VALUES ('${"e".repeat(64)}','old@x.test',1,1,2)`);
+  assert.equal((await fetch(BASE + "/__scheduled?cron=17+*+*+*+*", { headers: { connection: "close" } })).status, 200);
+  for (let i = 0; i < 40 && sql(`SELECT COUNT(*) AS n FROM sessions WHERE id_hash='${"e".repeat(64)}'`)[0].n; i++) await new Promise((r) => setTimeout(r, 250));
+  assert.equal(sql(`SELECT COUNT(*) AS n FROM sessions WHERE id_hash='${"e".repeat(64)}'`)[0].n, 0, "purged");
+  // A person keeps at most 10 sessions: the oldest end first.
+  for (let i = 0; i < 11; i++) await googleSignIn("cap@org.test");
+  assert.equal(sql("SELECT COUNT(*) AS n FROM sessions WHERE email='cap@org.test'")[0].n, 10);
+});
+
+test("operator rights only through Cloudflare Access: a Google session never reaches the operator console", async () => {
+  const s = await googleSignIn("ops@maintainer.test");
+  const me = await req("/api/c/me", { cookie: s.session });
+  assert.deepEqual([me.status, me.j.operator, me.j.via], [200, false, "google"], "same address, but not through the operator's seat");
+  assert.equal((await req("/api/op/programs", { cookie: s.session })).status, 401);
+  assert.equal((await req("/api/op/programs", { method: "POST", cookie: s.session, body: {} })).status, 401);
+  assert.equal((await req("/api/op/programs", { token: OPS() })).status, 200, "Access identity: allowed");
+  assert.equal((await req("/api/c/me", { token: OPS() })).j.operator, true);
+  assert.equal((await req("/api/c/op/programs", { token: OPS() })).status, 404, "old operator path is gone");
+});
+
+test("a newcomer signed in with Google can only apply (pending, reviewed), never see a program", async () => {
+  const s = await googleSignIn("newhost@community.test");
+  const me = await req("/api/c/me", { cookie: s.session });
+  assert.deepEqual([me.j.orgs, me.j.operator], [[], false]);
+  for (const p of ["/api/c/crotona-test/dashboard", "/api/c/other-org/dashboard"]) assert.equal((await req(p, { cookie: s.session })).status, 403, p);
+  assert.equal((await req("/api/op/programs", { cookie: s.session })).status, 401);
+  const before = sql("SELECT COUNT(*) AS n FROM audit WHERE action='signin_google'")[0].n;
+  await googleSignIn("another-newcomer@community.test");
+  assert.equal(sql("SELECT COUNT(*) AS n FROM audit WHERE action='signin_google'")[0].n, before, "non-staff sign-ins do not write to the audit chain");
+});
+
+test("lead handover: one step, never without an admin, audited; pending programs keep their applicant as only admin", async () => {
+  const L1 = jwt({ email: "lead1@hand.test" }), L2 = jwt({ email: "lead2@hand.test" });
+  assert.equal((await req("/api/op/programs", { method: "POST", token: OPS(), body: { name: "Handover Test", slug: "hand-test", borough: "Queens",
+    org_type: "faith", lead_email: "lead1@hand.test", status: "live", commitments_confirmed: true } })).status, 201);
+  const H = (t, b) => req("/api/c/hand-test/coordinators/handover", { method: "POST", token: t, body: b });
+  assert.equal((await H(L1, { email: "lead1@hand.test" })).j.error, "cannot_change_own_access");
+  assert.equal((await H(L1, { email: "nope" })).j.error, "bad_email");
+  assert.equal((await H(L1, { email: "lead2@hand.test", extra: 1 })).j.error, "unknown_field:extra");
+  assert.equal((await H(L1, { email: "Lead2@Hand.test" })).status, 200);
+  assert.deepEqual(sql("SELECT email, role FROM coordinators WHERE org_id=(SELECT id FROM orgs WHERE slug='hand-test') ORDER BY email"),
+    [{ email: "lead1@hand.test", role: "coordinator" }, { email: "lead2@hand.test", role: "admin" }]);
+  assert.equal((await H(L1, { email: "x@hand.test" })).j.error, "admin_only", "the former lead is now a coordinator");
+  assert.match(sql("SELECT subject FROM audit WHERE action='lead_handover' ORDER BY seq DESC LIMIT 1")[0].subject,
+    /^coord:[0-9a-f]{16}\|none->admin\|coord:[0-9a-f]{16}\|admin->coordinator$/);
+  // The new lead may remove the old one; the program always keeps an admin.
+  assert.equal((await req("/api/c/hand-test/coordinators/remove", { method: "POST", token: L2, body: { email: "lead1@hand.test" } })).status, 200);
+  // Pending program: no handover before review.
+  assert.equal((await req("/api/c/hb-two/coordinators/handover", { method: "POST", token: jwt({ email: "host@intake.test" }), body: { email: "z@hand.test" } })).j.error, "admin_after_review");
+});
+
+test("operator lead recovery: assign or replace a program's lead (live and pending), audited, never for declined or demo", async () => {
+  const A = (slug, b, t = OPS()) => req(`/api/op/programs/${slug}/lead`, { method: "POST", token: t, body: b });
+  assert.equal((await A("hand-test", { email: "lead3@hand.test" }, jwt({ email: "lead2@hand.test" }))).j.error, "operator_only");
+  assert.equal((await A("hand-test", { email: "bad" })).j.error, "bad_email");
+  assert.equal((await A("no-such-prog", { email: "a@b.test" })).status, 404);
+  assert.equal((await A("demo-test", { email: "a@b.test" })).j.error, "demo_program");
+  // Live, without replace: the new lead is added as an admin, the existing admin stays.
+  let r = await A("hand-test", { email: "Lead3@Hand.test" });
+  assert.deepEqual([r.status, r.j.lead, r.j.replaced], [200, "lead3@hand.test", false]);
+  const roles = () => sql("SELECT email, role FROM coordinators WHERE org_id=(SELECT id FROM orgs WHERE slug='hand-test') ORDER BY email");
+  assert.deepEqual(roles(), [{ email: "lead2@hand.test", role: "admin" }, { email: "lead3@hand.test", role: "admin" }]);
+  // Live, with replace: every other admin steps down to coordinator; nobody is removed.
+  r = await A("hand-test", { email: "lead3@hand.test", replace: true });
+  assert.deepEqual(roles(), [{ email: "lead2@hand.test", role: "coordinator" }, { email: "lead3@hand.test", role: "admin" }]);
+  assert.match(sql("SELECT actor, subject FROM audit WHERE action='lead_assigned' ORDER BY seq DESC LIMIT 1")[0].subject, /^lead:[0-9a-f]{16}\|replace:true$/);
+  // Pending: the new lead also becomes the applicant of record and the only admin.
+  r = await A("hb-two", { email: "newlead@intake.test" });
+  assert.deepEqual([r.status, r.j.replaced], [200, true]);
+  assert.equal(sql("SELECT applied_by FROM orgs WHERE slug='hb-two'")[0].applied_by, "newlead@intake.test");
+  assert.deepEqual(sql("SELECT email, role FROM coordinators WHERE org_id=(SELECT id FROM orgs WHERE slug='hb-two') ORDER BY email"),
+    [{ email: "host@intake.test", role: "coordinator" }, { email: "newlead@intake.test", role: "admin" }]);
+  // One pending program per lead still holds.
+  assert.equal((await req("/api/op/programs", { method: "POST", token: OPS(), body: { name: "Other Pending", slug: "other-pending", borough: "Bronx",
+    org_type: "faith", lead_email: "busy@intake.test", status: "pending", commitments_confirmed: true } })).status, 201);
+  assert.equal((await A("hb-two", { email: "busy@intake.test" })).j.error, "application_pending");
+  // Declined programs are approved first.
+  assert.equal((await req("/api/op/programs/other-pending/decline", { method: "POST", token: OPS(), body: {} })).status, 200);
+  assert.equal((await A("other-pending", { email: "a@b.test" })).j.error, "program_declined");
+});
+
+test("readiness reports Google sign-in configuration without secrets", async () => {
+  const r = await req("/api/health/ready");
+  assert.equal(r.j.checks.google_signin, true);
+  assert.ok(!JSON.stringify(r.j).includes(GSECRET) && !JSON.stringify(r.j).includes(GCLIENT), "no client id or secret");
 });

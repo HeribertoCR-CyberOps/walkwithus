@@ -28,7 +28,7 @@ const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 20
 const jwk = publicKey.export({ format: "jwk" });
 rmSync(P, { recursive: true, force: true }); mkdirSync(".wrangler", { recursive: true });
 writeFileSync(".dev.vars", [`DATA_KEY=${randomBytes(32).toString("base64")}`, `HMAC_KEY=${randomBytes(32).toString("base64")}`,
-  "ACCESS_TEAM_DOMAIN=t.cloudflareaccess.com", "ACCESS_AUD=a", "OPERATOR_EMAILS=ops@demo.test", `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: "k", alg: "RS256" }] })}`].join("\n") + "\n");
+  "ACCESS_TEAM_DOMAIN=t.cloudflareaccess.com", "ACCESS_AUD=a", "OPERATOR_EMAILS=ops@demo.test", "GOOGLE_CLIENT_ID=ui-test.apps.googleusercontent.com", "GOOGLE_CLIENT_SECRET=ui-test-secret", `ACCESS_JWKS_JSON=${JSON.stringify({ keys: [{ ...jwk, kid: "k", alg: "RS256" }] })}`].join("\n") + "\n");
 execFileSync("npx", ["wrangler", "d1", "migrations", "apply", "walkwithus", "--local", "--persist-to", P], { stdio: "ignore" });
 // A closure two days out: every family-page language must render the closure list, and that day must offer no times.
 const CLOSED_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(Date.now() + 2 * 86400000));
@@ -135,9 +135,19 @@ await check("new lead signs up and sees the pending dashboard", { ctx: { viewpor
   });
 // The operator sees it waiting, first.
 await check("operator review lists the pending program", { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok("ops@demo.test") } }, ready: "#oph" },
-  B + "/c.html", async (pg, text) => {
-    assert.ok(/Operator: program review \(1 waiting\)/.test(text));
+  B + "/op.html", async (pg, text) => {
+    assert.ok(/Program review \(1 waiting\)/.test(text));
     assert.ok(/Hunts Point Walkers/.test(text) && /new@lead\.test/.test(text));
+    assert.ok(await pg.isVisible("text=Assign or replace the lead"), "lead recovery offered");
+  });
+// The operator's staff page links to the console and does not offer the self-serve sign-up form.
+await check("operator staff page: console link, no self-serve form", { ctx: { viewport: { width: 1100, height: 900 }, extraHTTPHeaders: { "cf-access-jwt-assertion": tok("ops@demo.test") } }, ready: 'a[href="/op.html"]' },
+  B + "/c.html", async (pg) => { assert.equal(await pg.locator("#jh").count(), 0, "no 'Start a program' form for the operator"); });
+// Signed out: program staff see Google sign-in; volunteers are pointed to their own link.
+await check("signed-out staff page offers Google sign-in", { ctx: { viewport: { width: 1100, height: 900 } }, ready: "#sh" },
+  B + "/c.html", async (pg, text) => {
+    assert.equal(await pg.locator('a[href="/api/auth/google/start"]').count(), 1, "Sign in with Google link");
+    assert.ok(/check-in link/.test(text));
   });
 // Demo program: the walk form submits, shows the "nothing was saved" note, and stores nothing.
 await check("demo walk request shows 'nothing saved'", { ctx: {}, ready: "#wh" }, B + "/?o=demo", async (pg) => {

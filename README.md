@@ -52,7 +52,7 @@ openssl rand -base64 32 | npx wrangler secret put HMAC_KEY
 npx wrangler deploy
 ```
 
-Then: protect `/c.html*` and `/api/c/*` with a Cloudflare Access application, put its AUD tag and team domain in `wrangler.jsonc` → `vars`, redeploy, and seed your organization (see [`docs/DEPLOY.md`](docs/DEPLOY.md)).
+Then protect the operator console (`/op.html`, `/op`, `/api/op/*`) with a Cloudflare Access application, the only Access seat needed. Program staff sign in with Google instead. Set up the Google sign-in client, and put the AUD tag, team domain and Google client ID in `wrangler.jsonc` → `vars` (the client secret goes in with `wrangler secret put`). Redeploy (see [`docs/DEPLOY.md`](docs/DEPLOY.md)).
 
 **Back up `DATA_KEY`** somewhere safe (a password manager). Without it, encrypted contact numbers cannot be read; that is by design.
 

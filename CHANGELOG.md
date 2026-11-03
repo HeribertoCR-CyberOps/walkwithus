@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.5.0 — 2026-11-03
+**Organizations run their own programs: staff sign in with Google, and only the operator uses a Cloudflare seat.**
+- **Google sign-in for program staff (leads, admins, coordinators).**
+  - A lead adds a person's Google address in the app; that person signs in at `/c.html` the same day.
+  - Before, every new coordinator also had to be added to the Cloudflare Access policy by the operator, one seat each.
+  - Protocol: OpenID Connect authorization code with PKCE (S256), state and nonce, and only the `openid email` scopes. The code is exchanged server-side with the client secret.
+  - The Worker verifies the ID token itself: signature, issuer, audience, expiry, issued-at, nonce, and `email_verified`.
+- **Server-side sessions.**
+  - Cookie: `__Host-`, `HttpOnly`, `Secure`, `SameSite=Lax`. The database holds only the SHA-256 of the session id.
+  - Ends after 12 idle hours, after 7 days at most, on sign-out, and at once on every device when the person is removed from their last program.
+  - At most 10 per person. Cookie-authenticated writes are accepted from this site only.
+  - Staff sign-ins are in the audit chain, by keyed hash.
+- **Operator console at `/op.html` (`/api/op/*`)**, behind Cloudflare Access only. Operator rights never come from a Google session.
+  - The old `/api/c/op/*` paths are gone.
+  - The operator's staff page links to the console and no longer shows the self-serve sign-up form.
+- **Lead recovery:** the operator can assign or replace a program's lead (`POST /api/op/programs/:slug/lead`), for example when its only admin has left. Other admins step down; nobody is removed silently.
+- **Lead handover in one step:** a live program's admin hands the lead role to someone else (`POST /api/c/:slug/coordinators/handover`). The program always keeps an admin.
+- Migration `0006_google_sessions.sql` (new `sessions` table; hourly maintenance purges expired rows).
+- `/api/c/me` answers `200 { signed_in: false }` when signed out (a normal state for the staff page, not an error). Privacy page updated. Service-worker cache `wwu-v14`.
+- Tests:
+  - e2e 47 (10 new), with a fake Google token endpoint that enforces single-use codes, PKCE and `redirect_uri`.
+  - Refused: forged, unknown-key, `alg: none`, wrong-audience, wrong-issuer, expired, future-dated, unverified-email, wrong-nonce and replayed tokens, as well as state mismatch, a missing or tampered flow cookie, and cross-site writes.
+  - Mutation-checked: removing the signature, nonce, `email_verified` or same-site check, or granting operator rights via Google, each makes a test fail.
+  - Migrations 4 and UI smoke (Chromium and WebKit) also pass.
+
 ## 1.4.1 — 2026-11-02
 **Families who open a program link that isn't available now see a plain message, not an error code.**
 - Found in the founder's live production test of 1.4.0. A declined test program opened at `/?o=test-hc` showed "Something went wrong: no_org" and a stray "null".

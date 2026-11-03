@@ -15,6 +15,12 @@
 /c
   ! Cache-Control
   Cache-Control: no-store, no-transform
+/op.html
+  ! Cache-Control
+  Cache-Control: no-store, no-transform
+/op
+  ! Cache-Control
+  Cache-Control: no-store, no-transform
 /v.html
   ! Cache-Control
   Cache-Control: no-store, no-transform

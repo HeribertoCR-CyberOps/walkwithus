@@ -7,8 +7,13 @@
 //               POST /api/o/:slug/volunteer         adult volunteer application (pending until approved in person)
 //               POST /api/o/:slug/walk              "walk with me" request: public corner + 15-min slot + callback
 //   volunteer   POST /api/v/me | /api/v/checkin | /api/v/checkout     (256-bit capability token in body)
-//   coordinator /api/c/...                          Cloudflare Access JWT + coordinators table
+//   staff       /api/c/...                          Google sign-in session (or Cloudflare Access JWT) + coordinators table
+//   sign-in     GET /api/auth/google/start | /api/auth/google/callback, POST /api/auth/logout
+//   operator    /api/op/...                         Cloudflare Access JWT only + OPERATOR_EMAILS
 import { verifyAccess, type Identity } from "./access";
+import { GOOGLE_AUTH_URL, exchangeCode, verifyIdToken } from "./google";
+import { SESSION_COOKIE, FLOW_COOKIE, ABS_S, IDLE_S, setCookie, clearCookie, newFlow, takeFlow, createSession, sessionEmail, endSession,
+  endSessionsIfNoRole } from "./session";
 import { seal, open, hmac, sha256, randomString, capabilityToken, REF_ALPHABET, ID_ALPHABET } from "./crypto";
 
 export interface Env {
@@ -27,12 +32,16 @@ export interface Env {
   ACCESS_AUD: string;
   ACCESS_JWKS_JSON?: string;   // tests only: key set used instead of fetching certs; verification still enforced
   OPERATOR_EMAILS?: string;    // comma-separated, Access-verified emails allowed to review program sign-ups
+  GOOGLE_CLIENT_ID?: string;   // Google sign-in for program staff (OAuth client of type "Web application")
+  GOOGLE_CLIENT_SECRET?: string; // secret: `wrangler secret put GOOGLE_CLIENT_SECRET`
+  GOOGLE_JWKS_JSON?: string;   // tests only: key set used instead of Google's; verification still enforced
+  GOOGLE_TOKEN_URL?: string;   // tests only: a loopback (127.0.0.1) token endpoint; any other value is ignored
   JOIN_PENDING_CAP?: string;   // most programs waiting for review at once (default 25): a sign-up flood cannot bury real ones
   DEBUG?: string;              // "1" = include error message + first stack frame in logs. Local/dev only — never in production.
   RETENTION_HOURS: string;
 }
 
-const VERSION = "1.4.1";
+const VERSION = "1.5.0";
 const LANGS = ["en", "es", "zh", "ru", "bn", "ht", "ko", "ar", "ur", "fr", "pl", "ak", "wo", "ff"] as const;
 
 // ------------------------------------------------------------------ observability (structured, never personal data)
@@ -491,9 +500,26 @@ async function revealGuard(env: Env, orgId: number, actor: string): Promise<void
     throw e;
   }
 }
-async function coordinator(req: Request, env: Env, slug: string): Promise<{ id: Identity; org: Org; role: string }> {
-  const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
-  if (!id) throw new HttpError(401, "access_required");
+// ------------------------------------------------------------------ identity
+// Who is calling: a Cloudflare Access JWT (the operator; also leads while Access still fronts the staff pages) or a Google
+// sign-in session (program staff). Identity only: what the person may do is decided per request from the coordinators
+// table and OPERATOR_EMAILS. A session cookie is accepted for a state-changing request only from this site itself.
+interface Who extends Identity { via: "access" | "google"; }
+async function identify(req: Request, env: Env): Promise<Who> {
+  const a = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
+  if (a) return { ...a, via: "access" };
+  const email = await sessionEmail(env.DB, req);
+  if (!email) throw new HttpError(401, "signin_required");
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    const origin = req.headers.get("origin"), site = req.headers.get("sec-fetch-site");
+    if (!(origin === new URL(req.url).origin || (!origin && site === "same-origin"))) throw new HttpError(403, "cross_origin");
+  }
+  return { email, sub: "", via: "google" };
+}
+const googleReady = (env: Env) => !!env.GOOGLE_CLIENT_ID && !!env.GOOGLE_CLIENT_SECRET;
+
+async function coordinator(req: Request, env: Env, slug: string): Promise<{ id: Who; org: Org; role: string }> {
+  const id = await identify(req, env);
   const org = await orgBySlug(env, slug, ["pending", "live"]);   // a pending program's lead prepares it before review
   const row = await env.DB.prepare("SELECT role FROM coordinators WHERE email=? AND org_id=?").bind(id.email, org.id)
     .first<{ role: string }>();
@@ -548,7 +574,7 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     const todayNY = nyDate(now);
     const closures = (await env.DB.prepare("SELECT id, day, reason FROM closures WHERE org_id=? AND day >= ? ORDER BY day")
       .bind(org.id, todayNY).all()).results;
-    return json({ org: { slug: org.slug, name: org.name, demo: org.demo === 1, status: org.status }, you: { email: actor, role }, corners, walks, volunteers, on_shift: onShift,
+    return json({ org: { slug: org.slug, name: org.name, demo: org.demo === 1, status: org.status }, you: { email: actor, role, via: id.via }, corners, walks, volunteers, on_shift: onShift,
       windows, closures, today_ny: todayNY,
       readiness: ready, unreadable_records: unreadable, today: { ...today, walk_cap: cap.walk, apply_cap: cap.apply,
         walks_near_cap: today.walks >= Math.ceil(cap.walk * 0.8), applications_near_cap: today.applications >= Math.ceil(cap.apply * 0.8) },
@@ -756,6 +782,29 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
     const walksToCall = booked.filter((w) => { const p = nyParts(w.slot_start); return p.dow === win.dow && p.min >= win.start_min && p.min < win.end_min; }).length;
     return json({ ok: true, walks_to_call: walksToCall });
   }
+  // Lead handover in one step: the named person becomes an admin and the current admin steps down to coordinator.
+  // Both changes are written together, so the program always has an admin; both are audited (people by keyed hash).
+  if (req.method === "POST" && res === "coordinators" && rid === "handover" && rest.length === 2) {
+    if (role !== "admin") throw new HttpError(403, "admin_only");
+    if (org.status !== "live") bad("admin_after_review");
+    const b = await body<Record<string, unknown>>(req, ["email"]);
+    const email = str(b.email, 6, 254, "bad_email").toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) bad("bad_email");
+    if (email === actor) bad("cannot_change_own_access");
+    const cur = await env.DB.prepare("SELECT role FROM coordinators WHERE email=? AND org_id=?").bind(email, org.id).first<{ role: string }>();
+    if (!cur) {
+      const n = (await env.DB.prepare("SELECT COUNT(*) AS n FROM coordinators WHERE org_id=?").bind(org.id).first<{ n: number }>())?.n ?? 0;
+      if (n >= MAX_COORDINATORS) bad("too_many_coordinators");
+    }
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,'admin') ON CONFLICT DO UPDATE SET role='admin'").bind(email, org.id),
+      env.DB.prepare("UPDATE coordinators SET role='coordinator' WHERE email=? AND org_id=?").bind(actor, org.id),
+    ]);
+    const k = async (e: string) => "coord:" + (await hmac(env.HMAC_KEY, "email|" + e)).slice(0, 16);
+    await audit(env, org.id, actor, "lead_handover", `${await k(email)}|${cur?.role ?? "none"}->admin|${await k(actor)}|admin->coordinator`);
+    await invalidateOrg(org.slug);
+    return json({ ok: true });
+  }
   if (res === "coordinators" && (!rid || rid === "remove")) {
     const b = await body<Record<string, unknown>>(req, rid === "remove" ? ["email"] : ["email", "role"]);
     const email = str(b.email, 6, 254, "bad_email").toLowerCase();
@@ -769,7 +818,8 @@ async function coordApi(req: Request, env: Env, slug: string, rest: string[]): P
       if (!cur) throw new HttpError(404, "no_coordinator");
       if (cur.role === "admin" && admins <= 1) bad("last_admin");
       await env.DB.prepare("DELETE FROM coordinators WHERE email=? AND org_id=?").bind(email, org.id).run();
-      await audit(env, org.id, actor, "coordinator_removed", `${target}|${cur.role}->none`);
+      const ended = await endSessionsIfNoRole(env.DB, email);   // no program left: signed out on every device at once
+      await audit(env, org.id, actor, "coordinator_removed", `${target}|${cur.role}->none${ended ? "|sessions_ended" : ""}`);
       await invalidateOrg(org.slug);
       return json({ ok: true });
     }
@@ -816,6 +866,7 @@ export async function purge(env: Env, nowSec = Math.floor(Date.now() / 1000)): P
     env.DB.prepare("DELETE FROM rate WHERE window_start < ?").bind(nowSec - 2 * 86400),
     env.DB.prepare("DELETE FROM volunteers WHERE status='pending' AND created_at < ?").bind(nowSec - 30 * 86400),
     env.DB.prepare("DELETE FROM closures WHERE day < ?").bind(addDays(nyDate(nowSec), -7)),
+    env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ? OR last_seen <= ?").bind(nowSec, nowSec - IDLE_S),
   ]);
   // Sign-ups nobody reviewed within PENDING_EXPIRY_DAYS are closed (the lead may apply again), so a filled queue drains
   // by itself; and a declined program's web address is released after DECLINED_SLUG_RELEASE_DAYS so it cannot be squatted.
@@ -829,6 +880,7 @@ export async function purge(env: Env, nowSec = Math.floor(Date.now() / 1000)): P
     .bind(nowSec - DECLINED_SLUG_RELEASE_DAYS * 86400).run();
   return { shifts_closed: r[0]!.meta.changes, shifts_purged: r[2]!.meta.changes, walks_purged: r[4]!.meta.changes,
     rate_purged: r[5]!.meta.changes, stale_applications_purged: r[6]!.meta.changes, closures_purged: r[7]!.meta.changes,
+    sessions_purged: r[8]!.meta.changes,
     programs_expired: expired.length, slugs_released: released.meta.changes };
 }
 
@@ -931,6 +983,7 @@ async function health(env: Env): Promise<Response> {
   checks.keys = keyOk(env.DATA_KEY) && keyOk(env.HMAC_KEY) && (!env.DATA_KEY_PREV || keyOk(env.DATA_KEY_PREV));
   checks.rotation_in_progress = !!env.DATA_KEY_PREV;
   checks.access_configured = !env.ACCESS_AUD.startsWith("REPLACE") && !env.ACCESS_TEAM_DOMAIN.startsWith("REPLACE");
+  checks.google_signin = googleReady(env);
   let dbOk = false;
   try {
     await retry(() => env.DB.prepare("SELECT 1").first());
@@ -968,6 +1021,7 @@ async function health(env: Env): Promise<Response> {
   if (audit && audit.result && audit.result.ok === false) problems.push("audit_chain_broken");
   if (rk && (rk.failed ?? 0) > 0) problems.push("rekey_unreadable_rows");              // data that no configured key can open
   if (env.TURNSTILE_SECRET) problems.push("turnstile_secret_set_but_ui_not_wired");      // would make both public forms fail
+  if (env.GOOGLE_JWKS_JSON && !env.ACCESS_JWKS_JSON) problems.push("google_test_keys_in_production");   // test-only setting
   return json({ ok: problems.length === 0, version: VERSION, problems, checks }, problems.length ? 503 : 200);
 }
 
@@ -998,8 +1052,7 @@ function programFields(b: Record<string, unknown>): { name: string; slug: string
 }
 
 async function programJoin(req: Request, env: Env): Promise<Response> {
-  const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
-  if (!id) throw new HttpError(401, "access_required");
+  const id = await identify(req, env);
   const email = id.email.toLowerCase();
   await limit(env, "join-email", email, 20, 86400);
   await limit(env, "join-net", clientNet(req), 10, 86400);
@@ -1037,6 +1090,7 @@ async function programJoin(req: Request, env: Env): Promise<Response> {
 }
 
 async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Response> {
+  // The operator is the one Cloudflare Access seat: a Google session never reaches this console.
   const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
   if (!id) throw new HttpError(401, "access_required");
   if (!isOperator(env, id.email)) throw new HttpError(403, "operator_only");
@@ -1081,6 +1135,29 @@ async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Resp
     await audit(env, orgId, id.email, "program_created", `status:${b.status}|lead:${(await hmac(env.HMAC_KEY, "email|" + lead)).slice(0, 16)}`);
     return json({ ok: true, slug: f.slug, status: b.status, lead }, 201);
   }
+  // Recovery: the operator assigns (or replaces) a program's lead, e.g. when its only admin has left. The named person
+  // becomes an admin; with replace=true every other admin steps down to coordinator (nobody loses access silently).
+  // For a program still under review the lead is also its applicant of record (one pending program per lead still holds).
+  if (req.method === "POST" && res === "programs" && slug && verb === "lead" && rest.length === 3) {
+    const b = await body<Record<string, unknown>>(req, ["email", "replace"]);
+    if (!/^[a-z0-9-]{3,40}$/.test(slug)) throw new HttpError(404, "no_org");
+    const lead = str(b.email, 6, 254, "bad_email").toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(lead)) bad("bad_email");
+    const o = await env.DB.prepare("SELECT id, slug, status, demo FROM orgs WHERE slug=? AND active=1").bind(slug).first<{ id: number; slug: string; status: string; demo: number }>();
+    if (!o) throw new HttpError(404, "no_org");
+    if (o.demo === 1) bad("demo_program");
+    if (o.status === "declined") bad("program_declined");
+    const replace = o.status === "pending" || b.replace === true;   // before review there is only ever one admin
+    const stmts = [];
+    if (o.status === "pending") stmts.push(env.DB.prepare("UPDATE orgs SET applied_by=? WHERE id=?").bind(lead, o.id));
+    if (replace) stmts.push(env.DB.prepare("UPDATE coordinators SET role='coordinator' WHERE org_id=? AND role='admin' AND email<>?").bind(o.id, lead));
+    stmts.push(env.DB.prepare("INSERT INTO coordinators (email, org_id, role) VALUES (?,?,'admin') ON CONFLICT DO UPDATE SET role='admin'").bind(lead, o.id));
+    try { await env.DB.batch(stmts); }
+    catch (e) { if (String(e).includes("UNIQUE") && String(e).includes("applied_by")) throw new HttpError(409, "application_pending"); throw e; }
+    await audit(env, o.id, id.email, "lead_assigned", `lead:${(await hmac(env.HMAC_KEY, "email|" + lead)).slice(0, 16)}|replace:${replace}`);
+    await invalidateOrg(o.slug);
+    return json({ ok: true, slug: o.slug, lead, replaced: replace });
+  }
   if (req.method === "POST" && res === "programs" && slug && (verb === "approve" || verb === "decline")) {
     const b = await body<Record<string, unknown>>(req, ["force"]);
     if (!/^[a-z0-9-]{3,40}$/.test(slug)) throw new HttpError(404, "no_org");
@@ -1104,6 +1181,52 @@ async function operatorApi(req: Request, env: Env, rest: string[]): Promise<Resp
   throw new HttpError(404, "not_found");
 }
 
+// ------------------------------------------------------------------ Google sign-in for program staff
+function redirect(location: string, cookies: string[] = []): Response {
+  const h = new Headers({ location, "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff" });
+  for (const c of cookies) h.append("set-cookie", c);
+  return new Response(null, { status: 303, headers: h });
+}
+async function authApi(req: Request, env: Env, rest: string[]): Promise<Response> {
+  const [provider, step] = rest;
+  if (provider === "logout" && rest.length === 1 && req.method === "POST") {
+    const origin = req.headers.get("origin"), site = req.headers.get("sec-fetch-site");
+    if (!(origin === new URL(req.url).origin || (!origin && site === "same-origin"))) throw new HttpError(403, "cross_origin");
+    await endSession(env.DB, req);
+    return json({ ok: true }, 200, { "set-cookie": clearCookie(SESSION_COOKIE) });
+  }
+  if (provider !== "google" || rest.length !== 2 || req.method !== "GET" || (step !== "start" && step !== "callback")) throw new HttpError(404, "not_found");
+  if (!googleReady(env)) return redirect("/c.html#signin=unavailable");
+  const redirectUri = new URL(req.url).origin + "/api/auth/google/callback";
+  if (step === "start") {
+    await limit(env, "auth-start", clientNet(req), 30, 3600);
+    const { flow, cookie, challenge } = await newFlow(env.DATA_KEY);
+    const u = new URL(GOOGLE_AUTH_URL);
+    u.search = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID!, redirect_uri: redirectUri, response_type: "code",
+      scope: "openid email", state: flow.state, nonce: flow.nonce, code_challenge: challenge, code_challenge_method: "S256",
+      prompt: "select_account" }).toString();
+    return redirect(u.toString(), [cookie]);
+  }
+  await limit(env, "auth-callback", clientNet(req), 30, 3600);
+  const q = new URL(req.url).searchParams;
+  const fail = (why: string) => { log("info", "signin_failed", { why }); return redirect("/c.html#signin=failed", [clearCookie(FLOW_COOKIE)]); };
+  if (q.get("error")) return fail("cancelled");
+  const code = q.get("code") || "", state = q.get("state") || "";
+  if (!code || code.length > 2048 || state.length !== 43) return fail("params");
+  const flow = await takeFlow(req, env.DATA_KEY, state);
+  if (!flow) return fail("state");
+  const idt = await exchangeCode(code, env.GOOGLE_CLIENT_ID!, env.GOOGLE_CLIENT_SECRET!, redirectUri, flow.verifier, env.GOOGLE_TOKEN_URL);
+  if (!idt) return fail("exchange");
+  const email = await verifyIdToken(idt, env.GOOGLE_CLIENT_ID!, flow.nonce, env.GOOGLE_JWKS_JSON);
+  if (!email) return fail("token");
+  const sid = await createSession(env.DB, email);
+  // Sign-ins of program staff go into the audit chain (by keyed hash, never the address); other sign-ins only open
+  // the "start a program" form and are not recorded beyond their session.
+  if (await env.DB.prepare("SELECT 1 FROM coordinators WHERE email=? LIMIT 1").bind(email).first())
+    await audit(env, 0, "staff:" + (await hmac(env.HMAC_KEY, "email|" + email)).slice(0, 16), "signin_google", "session");
+  return redirect("/c.html", [clearCookie(FLOW_COOKIE), setCookie(SESSION_COOKIE, sid, ABS_S)]);
+}
+
 // ------------------------------------------------------------------ router
 async function route(req: Request, env: Env, p: string[]): Promise<Response> {
   if (!env.DATA_KEY || !env.HMAC_KEY) throw new HttpError(503, "not_configured");
@@ -1122,15 +1245,19 @@ async function route(req: Request, env: Env, p: string[]): Promise<Response> {
     if (req.method === "POST" && p[3] === "walk" && p.length === 4) return await walkRequest(req, env, p[2]);
   }
   if (p[1] === "v" && req.method === "POST" && p[2] && p.length === 3) return await volunteerApi(req, env, p[2]);
+  if (p[1] === "auth") return await authApi(req, env, p.slice(2));
   if (p[1] === "c" && p[2] === "me" && req.method === "GET") {
-    const id = await verifyAccess(req, env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD, env.ACCESS_JWKS_JSON);
-    if (!id) throw new HttpError(401, "access_required");
+    let id: Who;
+    try { id = await identify(req, env); }
+    // Signed out is a normal state for the staff page, not an error: it shows the sign-in instead.
+    catch (e) { if (e instanceof HttpError && e.status === 401) return json({ signed_in: false, email: null, orgs: [], operator: false, google: googleReady(env) }); throw e; }
     const { results } = await env.DB.prepare(
       "SELECT o.slug, o.name, o.status, c.role, (o.applied_by IS NOT NULL AND o.applied_by = c.email) AS applied FROM coordinators c JOIN orgs o ON o.id=c.org_id WHERE c.email=? AND o.active=1 AND o.status<>'declined'").bind(id.email).all();
-    return json({ email: id.email, orgs: results, operator: isOperator(env, id.email) });
+    // Operator rights come only through Cloudflare Access (the one seat), never through a Google session.
+    return json({ signed_in: true, email: id.email, via: id.via, orgs: results, operator: id.via === "access" && isOperator(env, id.email) });
   }
   if (p[1] === "c" && p[2] === "join" && p.length === 3 && req.method === "POST") return await programJoin(req, env);
-  if (p[1] === "c" && p[2] === "op") return await operatorApi(req, env, p.slice(3));
+  if (p[1] === "op") return await operatorApi(req, env, p.slice(2));
   if (p[1] === "c" && p[2]) return await coordApi(req, env, p[2], p.slice(3));
   throw new HttpError(404, "not_found");
 }
