@@ -18,7 +18,7 @@ const KID = "k1";
 // Google sign-in: a separate key pair, and a fake Google token endpoint on loopback that behaves like the real one
 // (client authentication, one-time codes, PKCE S256 and redirect_uri checks). The Worker still verifies every claim.
 const { publicKey: gPub, privateKey: gPriv } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-const GKID = "g1", GCLIENT = "test-client.apps.googleusercontent.com", GSECRET = "test-google-secret", IDP_PORT = 8797;
+const GKID = "g1", GCLIENT = "wwu-test-client-id", GSECRET = "test-google-secret", IDP_PORT = 8797;
 const idpCodes = new Map();   // code -> { claims, challenge, used, redirect }
 let idp;
 let proc, LOGFD; const DEVLOG = ".wrangler/test-dev.log"; mkdirSync(".wrangler", { recursive: true });  const devTail = () => { try { return readFileSync(DEVLOG, "utf8").slice(-3000); } catch { return ""; } };
@@ -945,7 +945,7 @@ test("Google sign-in: every forged, replayed or mismatched step is refused and c
   await failed("forged signature", await googleSignIn("admin@org.test", { opts: { key: roguePriv } }));
   await failed("unknown key id", await googleSignIn("admin@org.test", { opts: { kid: "nope" } }));
   await failed("alg none", await googleSignIn("admin@org.test", { opts: { alg: "none" } }));
-  await failed("wrong audience", await googleSignIn("admin@org.test", { claims: { aud: "someone-else.apps.googleusercontent.com" } }));
+  await failed("wrong audience", await googleSignIn("admin@org.test", { claims: { aud: "someone-elses-client-id" } }));
   await failed("multi-audience not issued to us", await googleSignIn("admin@org.test", { claims: { aud: [GCLIENT, "x"], azp: "x" } }));
   await failed("wrong issuer", await googleSignIn("admin@org.test", { claims: { iss: "https://evil.example" } }));
   await failed("expired (recently issued)", await googleSignIn("admin@org.test", { claims: { iat: now - 300, exp: now - 120 } }));
@@ -1106,10 +1106,10 @@ test("operator lead recovery: assign or replace a program's lead (live and pendi
 test("readiness reports Google sign-in configuration without secrets", async () => {
   const r = await req("/api/health/ready");
   assert.equal(r.j.checks.google_signin, true);
-  // Leak check, not URL validation: neither configured value may appear anywhere in the public readiness answer.
-  const body = JSON.stringify(r.j), lit = (x) => new RegExp(x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  assert.doesNotMatch(body, lit(GSECRET), "no client secret");
-  assert.doesNotMatch(body, lit(GCLIENT), "no client id");
+  // Leak check: neither configured value appears anywhere in the public readiness answer.
+  const body = JSON.stringify(r.j);
+  assert.equal(body.indexOf(GSECRET), -1, "no client secret");
+  assert.equal(body.indexOf(GCLIENT), -1, "no client id");
 });
 
 test("an address is bound to the first Google account that used it; the operator's lead assignment releases it", async () => {
