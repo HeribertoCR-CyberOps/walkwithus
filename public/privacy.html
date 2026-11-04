@@ -9,6 +9,12 @@
 <section class="card"><h2>We collect only</h2><ul>
 <li><strong>Walk requests:</strong> a public meeting corner, a 15-minute time slot, a language preference, and a callback phone number. The number is encrypted (AES-256-GCM) and readable only by the program's coordinators; each time one is viewed, that view is logged. The whole request is deleted automatically 72 hours after the walk time.</li>
 <li><strong>Volunteers:</strong> name, phone (both encrypted), preferred corners, and check-in/check-out times at public corners. Shift records are deleted after 72 hours; only anonymous totals (adult-minutes per corner per day) are kept for reporting.</li>
+<li><strong>Program staff (coordinators and leads):</strong> the email address of the Google account they sign in with, the programs they help run, and their sign-in session.
+<ul>
+<li>We ask Google for nothing else: no name, no photo, no contacts.</li>
+<li>Google learns that the person signed in to Walk With Us; families and volunteers never sign in with Google.</li>
+<li>Sessions end after 12 idle hours, after 7 days at most, on sign-out, and when the person is removed from their program.</li>
+</ul></li>
 <li><strong>Abuse protection:</strong> request counts keyed by a one-way hash that changes daily. Raw IP addresses are not stored.</li></ul></section>
 <section class="card"><h2>Who runs this</h2><p>Each program is run by the community organization named on its page, which is responsible for its volunteers and coordinators. The software is free and open source (AGPL-3.0); anyone can inspect exactly what it does.</p>
 <p>This is not an emergency service. If someone is in danger, call <a href="tel:911">911</a>.</p></section>

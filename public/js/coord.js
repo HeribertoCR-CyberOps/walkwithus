@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Savvy Solution Pros LLC. Walk With Us — see NOTICE.
 import { el, api, hhmm } from "./i18n.js";
+import { note, ERR, act, BOROUGHS, ORG_TYPES, ACKS } from "./staff.js";
 
 const fmt = (s) => new Date(s * 1000).toLocaleString(undefined, { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const content = document.getElementById("content");
@@ -11,16 +12,6 @@ const qSlug = new URLSearchParams(location.search).get("o");
 let slug = qSlug && SLUG.test(qSlug) ? qSlug : null;
 let D = null;
 
-function note(box, ok, ...n) { box.className = "result " + (ok ? "ok" : "err"); box.replaceChildren(...n); }
-const ERR = {
-  admin_after_review: "Until the program is reviewed, only the person who signed it up can be an admin. Add this person as a coordinator now; make them an admin after review.",
-  too_many_coordinators: "This program has reached its coordinator limit (5 before review, 50 after).",
-  too_many_corners: "This program has reached its limit of 50 active corners.", too_many_windows: "This program has reached its limit of 300 published hour blocks.",
-  rate_limited: "Too many changes in the last hour. Please wait and try again.", bad_status: "Choose pending or live.", bad_email: "Enter a valid email address.", application_pending: "You already have a program waiting for review.",
-  slug_taken: "That web address is taken. Choose another.", slug_reserved: "That web address is reserved. Choose another.",
-  commitments_required: "Please confirm all five commitments.", review_queue_full: "The review queue is full right now. Please try again in a few days or write to the maintainers.",
-};
-async function act(box, fn) { try { await fn(); } catch (e) { note(box, false, ERR[e.code] || "Error: " + e.message); } }
 
 // Program status: is the public walk form open, and how close is today's traffic to the daily ceilings?
 function statusSection() {
@@ -170,25 +161,21 @@ function adminSection() {
       el("label", { for: "w-d", text: "Day" }), el("select", { id: "w-d" }, ...days.map((d, i) => el("option", { value: i, text: d }))),
       el("div", { class: "grid2" }, el("div", {}, ...f("w-s", "Start (HH:MM, 15-min)", { value: "07:30" })), el("div", {}, ...f("w-e", "End", { value: "08:45" }))),
       el("button", { text: "Add window", onclick: () => act(box, async () => { await api(`/api/c/${slug}/windows`, "POST", { corner_id: Number(v("w-c")), dow: Number(v("w-d")), start: v("w-s"), end: v("w-e") }); note(box, true, "Window added."); setTimeout(load, 1500); }) })),
-    el("details", {}, el("summary", { text: "Add a coordinator" }), ...f("k-email", "Email (must be allowed by Cloudflare Access)", { type: "email" }),
+    el("details", {}, el("summary", { text: "Add a coordinator" }), ...f("k-email", "Their Google account email (Gmail or a Google Workspace address)", { type: "email" }),
+      el("p", { class: "muted", text: `They open ${location.origin}/c.html and choose "Sign in with Google" with that same address. Nothing else to set up.` }),
       el("label", { class: "check" }, el("input", { type: "checkbox", id: "k-admin" }), el("span", { text: "Admin" })),
       el("button", { text: "Save", onclick: () => act(box, async () => { await api(`/api/c/${slug}/coordinators`, "POST", { email: v("k-email"), role: document.getElementById("k-admin").checked ? "admin" : "coordinator" }); note(box, true, "Saved."); }) })),
     el("details", {}, el("summary", { text: "Remove a coordinator" }), ...f("r-email", "Email", { type: "email" }),
-      el("p", { class: "muted", text: "Another admin must remove or demote you; the last admin cannot be removed. Also remove them from the Cloudflare Access policy." }),
+      el("p", { class: "muted", text: "Their access ends at once and, if this was their last program, they are signed out on every device. Another admin must remove or demote you; the last admin cannot be removed." }),
       el("button", { class: "danger", text: "Remove", onclick: () => act(box, async () => { if (!confirm(`Remove ${v("r-email")} as a coordinator?`)) return;
         await api(`/api/c/${slug}/coordinators/remove`, "POST", { email: v("r-email") }); note(box, true, "Removed."); }) })),
+    D.org.status === "live" ? el("details", {}, el("summary", { text: "Hand over the lead role" }), ...f("h-email", "New lead's Google account email", { type: "email" }),
+      el("p", { class: "muted", text: "In one step they become an admin and you become a coordinator, so the program is never without a lead. They can remove you later if you are leaving." }),
+      el("button", { text: "Hand over", onclick: () => act(box, async () => { if (!confirm(`Make ${v("h-email")} the lead (admin) and step down to coordinator?`)) return;
+        await api(`/api/c/${slug}/coordinators/handover`, "POST", { email: v("h-email") }); note(box, true, "Handed over."); setTimeout(load, 2000); }) })) : null,
     el("div", { class: "row" }, el("button", { class: "secondary", text: "Verify audit log", onclick: () => act(box, async () => { const r = await api(`/api/c/${slug}/audit/verify`, "POST", {});
       note(box, r.ok, `Audit chain ${r.ok ? "intact" : "BROKEN — contact the maintainers"} — ${r.entries} entries for this program`); }) })), box);
 }
-
-const BOROUGHS = ["Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"];
-const ORG_TYPES = [["nonprofit", "Nonprofit (501(c)(3) or fiscally sponsored)"], ["school_parent_group", "School parent group (PTA/PA)"],
-  ["faith", "Faith community"], ["tenant_association", "Tenant or block association"], ["community_board", "Community board / civic group"], ["other", "Other community organization"]];
-const ACKS = [["ack_lead", "We have a named lead and at least one coordinator reachable during our published hours."],
-  ["ack_meet_in_person", "We meet every volunteer in person and brief them before approving them."],
-  ["ack_rule_of_two", "Walks always go to two approved adults (the software enforces this)."],
-  ["ack_not_emergency", "This is not an emergency service: danger means 911, and volunteers never act as police."],
-  ["ack_coverage", "We have, or will have before the first shift, liability coverage or a fiscal sponsor."]];
 
 function joinSection(me) {
   const box = el("div", { "aria-live": "polite" });
@@ -215,74 +202,51 @@ function joinSection(me) {
     box);
 }
 
-async function operatorSection() {
-  const box = el("div", { "aria-live": "polite" });
-  const { programs } = await api("/api/c/op/programs");
-  const when = (t) => (t ? new Date(t * 1000).toLocaleDateString() : "—");
-  const rows = programs.filter((p) => !p.demo).map((p) => el("tr", {},
-    el("td", {}, el("strong", { text: p.name }), el("div", { class: "muted", text: `${p.slug} · ${p.borough || "—"} · ${p.org_type || "—"}` }),
-      el("div", { class: p.lead ? "muted" : "result err", text: `Signed up by: ${p.lead || "not recorded (set up by hand or before v1.3.1): verify who leads it"}${p.public_phone ? " · " + p.public_phone : ""}` }),
-      p.other_coordinators ? el("div", { class: "muted", text: `${p.lead ? "Added by the lead (not verified)" : "Coordinators"}: ${p.other_coordinators}` }) : null),
-    el("td", {}, el("span", { class: "badge " + (p.status === "live" ? "ok" : p.status === "pending" ? "warn" : ""), text: p.status }),
-      el("div", { class: "muted", text: `applied ${when(p.applied_at)} · reviewed ${when(p.reviewed_at)}` }),
-      el("div", { class: "muted", text: `${p.corners} corners · ${p.windows} hours · ${p.coordinators} coordinators` })),
-    el("td", {}, el("div", { class: "row" },
-      p.status !== "live" ? el("button", { text: "Approve (verified)", onclick: () => act(box, async () => {
-        if (!confirm(`Set ${p.name} live? Confirm you verified the organization and spoke with its lead.`)) return;
-        await api(`/api/c/op/programs/${encodeURIComponent(p.slug)}/approve`, "POST", {}); load(); }) }) : null,
-      p.status !== "declined" ? el("button", { class: "danger", text: p.status === "live" ? "Take offline" : "Decline", onclick: () => act(box, async () => {
-        if (!confirm(`${p.status === "live" ? "Take" : "Decline"} ${p.name}? Its public page closes within a minute and its volunteer links stop at once.`)) return;
-        const url = `/api/c/op/programs/${encodeURIComponent(p.slug)}/decline`;
-        try { await api(url, "POST", {}); }
-        catch (e) {
-          if (e.code !== "walks_pending") throw e;
-          if (!confirm(`${p.name} has ${e.data.walks} booked walk request${e.data.walks === 1 ? "" : "s"}. Its coordinators will lose access to the callback numbers. Call the lead first so those families are called. Take it offline anyway?`)) return;
-          await api(url, "POST", { force: true });
-        }
-        load(); }) }) : null))));
-  const pending = programs.filter((p) => p.status === "pending").length;
-  // Set up a program from an intake: the operator has spoken with the organization and assigns its lead's email.
-  const inp = (id, label, attrs = {}) => [el("label", { for: id, text: label }), el("input", { id, type: "text", ...attrs })];
-  const v = (id) => document.getElementById(id).value.trim();
-  const setup = el("details", {}, el("summary", { text: "Set up a program from an intake" }),
-    el("p", { class: "muted", text: "Use this after you have spoken with the organization. Its lead signs in with the email below and then manages corners, hours, coordinators and volunteers for this program only." }),
-    ...inp("o-name", "Program name", { maxlength: 120 }), ...inp("o-slug", "Web address (?o=…)", { maxlength: 40 }),
-    ...inp("o-lead", "Lead's email (they sign in with it)", { type: "email" }),
-    el("label", { for: "o-borough", text: "Borough" }), el("select", { id: "o-borough" }, ...BOROUGHS.map((b) => el("option", { value: b, text: b }))),
-    el("label", { for: "o-type", text: "Organization type" }), el("select", { id: "o-type" }, ...ORG_TYPES.map(([k, t]) => el("option", { value: k, text: t }))),
-    ...inp("o-phone", "Program phone shown to families (optional)", { type: "tel" }),
-    el("label", { for: "o-status", text: "Start as" }), el("select", { id: "o-status" },
-      el("option", { value: "pending", text: "Pending: the lead prepares it, nothing public yet" }), el("option", { value: "live", text: "Live: verified now, public page opens" })),
-    el("label", { class: "check" }, el("input", { type: "checkbox", id: "o-commit" }), el("span", { text: "I confirmed the five commitments with the lead (named lead and coordinator, volunteers met in person, Rule of Two, not an emergency service, liability coverage or fiscal sponsor)." })),
-    el("button", { text: "Create program", onclick: () => act(box, async () => {
-      const r = await api("/api/c/op/programs", "POST", { name: v("o-name"), slug: v("o-slug"), lead_email: v("o-lead"), borough: v("o-borough"),
-        org_type: v("o-type"), public_phone: v("o-phone"), status: v("o-status"), commitments_confirmed: document.getElementById("o-commit").checked });
-      note(box, true, `Created ${r.slug} (${r.status}) for ${r.lead}. Ask them to open the coordinator page and sign in with that email.`); setTimeout(load, 4000); }) }));
-  return el("section", { class: "card", "aria-labelledby": "oph" }, el("h2", { id: "oph", text: `Operator: program review (${pending} waiting)` }), setup,
-    el("p", { class: "muted", text: "Before approving: confirm the organization exists (website, EIN or sponsor letter), speak with the lead, and check the commitments with them. Every decision is in the audit log." }),
-    rows.length ? el("div", { class: "scroll" }, el("table", {}, el("tbody", {}, ...rows))) : el("p", { class: "muted", text: "No programs." }), box);
+// Program staff sign in with their own Google account; the program's lead adds that address to the staff list.
+function signinSection(googleReady) {
+  const h = new URLSearchParams(location.hash.slice(1)).get("signin");
+  const msg = h === "failed" ? "Sign-in did not complete. Please try again."
+    : h === "account" ? "This email address is already linked to a different Google account. Ask the Walk With Us operator to reset it after confirming who you are." : h === "unavailable" || googleReady === false ? "Google sign-in is not available yet. Please contact the Walk With Us operator." : null;
+  return el("section", { class: "card", "aria-labelledby": "sh" }, el("h2", { id: "sh", text: "Program staff sign-in" }),
+    el("p", { text: "Coordinators and leads of a Walk With Us program sign in with the Google account (Gmail or Google Workspace) their program lead added. We receive only your email address from Google." }),
+    msg ? el("p", { class: "result err", role: "alert", text: msg }) : null,
+    googleReady === false ? null : el("p", {}, el("a", { class: "btn", href: "/api/auth/google/start", text: "Sign in with Google" })),
+    el("p", { class: "muted", text: "Volunteers do not sign in here: they use the personal check-in link their coordinator gives them." }));
+}
+function who(text, via) {
+  const w = document.getElementById("who");
+  w.replaceChildren(text, via === "google" ? el("button", { class: "secondary", text: "Sign out", onclick: async () => {
+    try { await api("/api/auth/logout", "POST", {}); } catch {} location.replace("/c.html"); } }) : "");
 }
 
 async function load() {
   try {
     if (!slug) {
       const me = await api("/api/c/me");
-      document.getElementById("who").textContent = me.email;
+      if (!me.signed_in) { who("", null); content.replaceChildren(signinSection(me.google)); return; }
+      who(me.email, me.via);
       if (me.orgs.length === 1 && SLUG.test(me.orgs[0].slug) && !me.operator) slug = me.orgs[0].slug;
       else {
         const parts = [];
-        if (me.operator) parts.push(await operatorSection());
+        if (me.operator) parts.push(el("section", { class: "card" }, el("h2", { text: "Operator" }),
+          el("p", {}, el("a", { href: "/op.html", text: "Open the operator console (program review, set-up from an intake, lead recovery)" }))));
         if (me.orgs.length) parts.push(el("section", { class: "card" }, el("h2", { text: "Your programs" }),
           el("ul", { class: "plain" }, ...me.orgs.map((o) => el("li", {}, el("a", { href: `?o=${encodeURIComponent(o.slug)}`, text: `${o.name} (${o.role}${o.status === "pending" ? ", waiting for review" : ""})` }))))));
-        if (!me.orgs.some((o) => o.status === "pending" && o.applied)) parts.push(joinSection(me));
+        // The operator sets programs up from an intake in the console; the self-serve form is for organizations.
+        if (!me.operator && me.join_open && !me.orgs.some((o) => o.status === "pending" && o.applied)) parts.push(joinSection(me));
+        else if (!me.operator && !me.orgs.length) parts.push(el("section", { class: "card", "aria-labelledby": "nh" }, el("h2", { id: "nh", text: "No program yet" }),
+          el("p", { text: `You are signed in as ${me.email}, but this address is not on any program's staff list.` }),
+          el("ul", {}, el("li", { text: "Coordinators: ask your program's lead to add this exact Google address." }),
+            el("li", { text: "Organizations that want to run a program: the Walk With Us team sets it up with you after an intake conversation (see the home page)." }))));
         content.replaceChildren(...parts); return;
       }
     }
     D = await api(`/api/c/${slug}/dashboard`);
-    document.getElementById("who").textContent = `${D.you.email} · ${D.you.role} · ${D.org.name}`;
+    who(`${D.you.email} · ${D.you.role} · ${D.org.name}`, D.you.via);
     content.replaceChildren(...[statusSection(), cornersSection(), walksSection(), closuresSection(), volunteersSection(), adminSection()].filter(Boolean));
   } catch (e) {
-    content.replaceChildren(el("p", { class: "result err", text: e.message === "access_required" ? "Sign in through your organization's Cloudflare Access link." : e.message === "not_a_coordinator_for_org" ? "Your account is not a coordinator for this program." : "Error: " + e.message }));
+    if (e.code === "signin_required") { content.replaceChildren(signinSection(e.data && e.data.google)); return; }
+    content.replaceChildren(el("p", { class: "result err", text: e.code === "not_a_coordinator_for_org" ? "Your account is not on this program's staff list. Ask the program's lead to add the Google address you signed in with." : ERR[e.code] || "Error: " + e.message }));
   }
 }
 document.getElementById("refresh").addEventListener("click", load);

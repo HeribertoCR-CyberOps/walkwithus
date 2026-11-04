@@ -43,3 +43,16 @@ test("0005 enforces one pending program per applicant, and only while pending", 
   db.exec("INSERT INTO orgs (slug, name, status, applied_by) VALUES ('p-two','P Two','pending','x@a.test')");
   assert.throws(() => db.exec("INSERT INTO orgs (slug, name, status, applied_by) VALUES ('p-3','P 3','pending','Upper@a.test')"), /CHECK/, "stored lowercase");
 });
+
+test("0006 sessions: only a 64-hex hash as key, lower-case email, expiry after creation", () => {
+  const db = new DatabaseSync(":memory:");
+  for (const f of files) apply(db, f);
+  const h = "a".repeat(64);
+  db.exec(`INSERT INTO sessions (id_hash, email, created_at, last_seen, expires_at) VALUES ('${h}','x@a.test',10,10,20)`);
+  assert.throws(() => db.exec("INSERT INTO sessions VALUES ('raw-session-id','y@a.test',10,10,20)"), /CHECK/, "a raw session id cannot be stored");
+  assert.throws(() => db.exec(`INSERT INTO sessions VALUES ('${"b".repeat(64)}','Y@a.test',10,10,20)`), /CHECK/, "email stored lower-case");
+  assert.throws(() => db.exec(`INSERT INTO sessions VALUES ('${"c".repeat(64)}','z@a.test',10,10,10)`), /CHECK/, "expiry after creation");
+  assert.throws(() => db.exec(`INSERT INTO sessions VALUES ('${h}','x@a.test',10,10,20)`), /UNIQUE|PRIMARY/);
+  const idx = db.prepare("PRAGMA index_list(sessions)").all().map((i) => i.name);
+  assert.ok(idx.includes("idx_sessions_email") && idx.includes("idx_sessions_expires"));
+});

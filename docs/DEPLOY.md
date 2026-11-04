@@ -23,19 +23,48 @@ Built in, nothing to configure: per-network rate limits (IPv4 address or IPv6 /6
 
 **Turnstile is not wired into the pages yet.** Do **not** set `TURNSTILE_SECRET`: the server would then require a token the pages never send, and both public forms would fail. The readiness probe reports `turnstile_secret_set_but_ui_not_wired` if it is set. Adding the widget also means allowing `https://challenges.cloudflare.com` in the CSP, which ends the "no third-party requests" promise; decide that deliberately.
 
-## 3. Coordinator sign-in (Cloudflare Access)
+## 3. Sign-in: one Cloudflare seat for the operator, Google for program staff (v1.5)
 
-Zero Trust → Access → Applications → **Self-hosted**:
-- Name `walkwithus-coordinators`
-- Domains: `<host>/c.html` and `<host>/api/c/*`
-- Policy, choose one:
-  - **Invite-only** (default): Allow → the emails (or an Entra/Google group) of your coordinators. New program leads can sign up only after you add their email.
-  - **Open sign-up**: Allow → *Everyone*, login method **One-time PIN** (Access emails a code, which proves the person controls that address). Anyone can then start a program, but it stays private until an operator approves it, and the app still admits each person only to the programs they belong to. Keep a separate, stricter Access policy (MFA, short session) for your operators if you can.
-  - **Operators are identified by email.** Only use identity providers that verify the email they assert (Access one-time PIN, Google, Microsoft Entra). Never let a self-service OIDC/SAML provider where users choose their own email claim sign in to this application.
-- Copy the **AUD tag**; set `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) in `wrangler.jsonc` vars; `npx wrangler deploy`.
-- Set `OPERATOR_EMAILS` (comma-separated) to the people who review new programs. Leave it empty and no one can approve sign-ups (existing programs keep working). `JOIN_PENDING_CAP` (default 25) limits how many programs can wait for review at once.
+**Who signs in how**
+- **The operator** (whoever reviews programs) signs in through Cloudflare Access. That is the only Access seat Walk With Us needs.
+- **Program staff** (each organization's lead, admins and coordinators) sign in with their own Google account (Gmail or Google Workspace). They use no Access seat. Their lead adds their address in the app.
+- **Volunteers** never sign in. They use the personal check-in link their coordinator gives them.
 
-The Worker verifies the Access JWT itself (RS256, issuer, audience, expiry, key id) — Access in front plus verification behind.
+**3a. Cloudflare Access: the operator console only.** Zero Trust → Access → Applications → **Self-hosted**:
+- Name `walkwithus-operator`.
+- Destinations: `<host>/op.html`, `<host>/op` and `<host>/api/op/*`.
+- **Do not** put `/c.html` or `/api/c/*` behind Access: program staff reach them with Google.
+- Policy: Allow → the operator's email(s) only. Login method One-time PIN or a verified identity provider; MFA if you can.
+- Copy the **AUD tag**. Set `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) in `wrangler.jsonc` vars, and `OPERATOR_EMAILS` (comma-separated).
+- Operator rights are granted **only** through a verified Access token. A Google session for the same address is treated as program staff.
+- Narrow the policy to the operator email(s) only. An "Everyone" policy would keep issuing valid tokens and using seats for no reason.
+- Set `workers_dev: false` (and keep `preview_urls: false`). On a `*.workers.dev` address nothing sits in front of `/api/op/*`. The Worker still verifies every Access token there, but there is no reason to expose a second address.
+- Only use identity providers that verify the email they assert. Never one where users choose their own email claim.
+- **Upgrading from 1.4**, in this order:
+  1. Add the three destinations above to your existing Access application.
+  2. Deploy 1.5 with the Google settings below. If staff currently sign in through Access, also set `ACCESS_FOR_STAFF=1`, so they keep working until they have used Google once.
+  3. Remove the old `/c.html`, `/c` and `/api/c/*` destinations, and narrow the policy to the operator.
+  4. Remove `ACCESS_FOR_STAFF` and redeploy.
+- Without `ACCESS_FOR_STAFF=1`, the public staff pages ignore Access tokens entirely. Once Access no longer stands in front of them, it cannot revoke or re-check those tokens there.
+
+**3b. Google sign-in for program staff.** Google Cloud console:
+1. Create a project, for example "Walk With Us".
+2. **Google Auth Platform → Branding:** app name, a support email, and authorized domain `<your root domain>`. Add the privacy policy link `https://<host>/privacy`.
+3. **Audience:** user type **External**, publishing status **In production**. In *Testing* only listed test users can sign in.
+4. **Data access:** add the scopes `openid` and `.../auth/userinfo.email` only. These are non-sensitive scopes.
+5. **Clients → Create client → Web application**, with the authorized redirect URI exactly `https://<host>/api/auth/google/callback`.
+6. Put the client ID in `wrangler.jsonc` vars as `GOOGLE_CLIENT_ID`. Then run `npx wrangler secret put GOOGLE_CLIENT_SECRET` and paste the secret; it never goes in a file or in Git.
+7. Deploy. `/api/health/ready` then shows `checks.google_signin: true`, and `/c.html` shows **Sign in with Google**.
+
+Without the two Google settings, the staff page says sign-in is not available yet. Nothing else breaks.
+
+**3c. How programs are created: `JOIN_MODE`.**
+- **`invite`** (default): you set each program up from an intake in the operator console, naming its lead's Google address. Signing in with Google gives a stranger nothing: no program, and no sign-up form.
+- **`open`**: anyone signed in with Google may submit a program for review. It stays private until you approve it, with 10 sign-ups per network per day and `JOIN_PENDING_CAP` (default 25) waiting at once. Use this only if you are ready to clear fake sign-ups.
+
+**Account binding:** each email address is bound to the first Google account that signs in with it. A different Google account presenting the same address is refused. This covers a former owner of a work address, or someone who re-registered a lapsed domain. The person sees "linked to a different Google account". After you have confirmed who they are, **Assign or replace the lead** in the console releases the binding for that address.
+
+The Worker verifies every Access JWT (RS256, issuer, audience, expiry, key id) and every Google ID token (signature, issuer, audience, expiry, nonce, verified email) itself.
 
 ## 4. Add an organization
 
