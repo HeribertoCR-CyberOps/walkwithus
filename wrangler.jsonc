@@ -2,6 +2,7 @@
 // Secrets (never in this file):  wrangler secret put DATA_KEY   (base64, 32 random bytes — AES-256-GCM at rest)
 //                                wrangler secret put HMAC_KEY   (base64, 32 random bytes — keyed hashes for dedupe/rate limits)
 //                                wrangler secret put TURNSTILE_SECRET   (optional; enables bot check on public forms)
+//                                wrangler secret put GOOGLE_CLIENT_SECRET (program-staff Google sign-in; pairs with the GOOGLE_CLIENT_ID var below)
 {
   "name": "walkwithus",
   "main": "src/index.ts",
