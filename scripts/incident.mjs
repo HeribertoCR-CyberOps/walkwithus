@@ -72,11 +72,9 @@ if (edgeOnly) {
     gh(["issue", "create", "--title", BLOCKED_TITLE, "--label", BLOCKED_LABEL, "--body", note]);
     console.log("opened monitor-blocked");
   } else {
-    // At most one comment a day while the block persists.
-    const comments = JSON.parse(gh(["issue", "view", String(blocked.number), "--json", "comments"]) || "{}").comments || [];
-    const last = comments[comments.length - 1];
-    if (!last || Date.now() - Date.parse(last.createdAt) >= 86400_000) gh(["issue", "comment", String(blocked.number), "--body", note]);
-    console.log(`monitor still blocked (#${blocked.number})`);
+    // No repeat comments while the block persists: the issue already says it, and each comment emails the owner.
+    // The block is a known edge condition (primary monitoring runs from operator infrastructure); the run log keeps the detail.
+    console.log(`monitor still blocked (#${blocked.number}); no comment posted`);
   }
   if (open) {
     gh(["issue", "comment", String(open.number), "--body", `Reclassified at ${stamp}: the only failing probes are Cloudflare refusing the monitor, not the app failing. Tracked as "${BLOCKED_TITLE}". Closing this incident.`]);
