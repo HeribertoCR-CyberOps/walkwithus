@@ -22,12 +22,12 @@
     "outcomes": "node scripts/outcomes.mjs"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20261031.1",
+    "@cloudflare/workers-types": "5.20261104.1",
     "axe-core": "4.14.0",
     "fast-check": "4.10.2",
     "playwright": "1.64.1",
     "typescript": "5.9.3",
-    "wrangler": "4.156.0"
+    "wrangler": "4.157.0"
   },
   "engines": {
     "node": ">=20"
